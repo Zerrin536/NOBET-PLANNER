@@ -9,7 +9,8 @@ from src.requests_repo import add_request, list_requests, set_request_status, de
 st.set_page_config(page_title="Nöbet Planlayıcı", layout="wide")
 init_db()
 
-st.title("Mini Akıllı Nöbet / Vardiya Planlayıcı")
+st.title("Akıllı Nöbet / Vardiya Planlayıcı")
+
 
 tab_staff, tab_unav, tab_req, tab_other = st.tabs(
     ["👩‍⚕️ Personel", "🩺 Rapor / İzin", "📝 İstek Defteri", "⚙️ Diğer (sonra)"]
