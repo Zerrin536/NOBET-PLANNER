@@ -9,7 +9,7 @@ from src.unavailability_repo import (
     add_unavailability_range, list_unavailability, delete_unavailability
 )
 from src.requests_repo import (
-    add_request, list_requests, set_request_status, delete_request
+    add_request, list_requests, set_request_status, delete_request, list_approved_requests
 )
 from src.holidays_repo import (
     add_holidays, list_holidays, delete_holiday
@@ -18,7 +18,6 @@ from src.calendar_utils import (
     iter_month_days, count_weekdays_excluding_holidays
 )
 from src.blockers import build_blocked_days_with_type
-
 from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours
 from src.assignments_repo import clear_month, insert_assignments, list_month
 from src.rules_repo import ensure_rules_table, add_rule, list_rules, set_rule_active, delete_rule
@@ -41,8 +40,8 @@ with tab_staff:
 
     with col1:
         st.markdown("### Tek Tek Ekle")
-        name = st.text_input("Hemşire adı soyadı", placeholder="Örn: Ayşe Yılmaz")
-        if st.button("Ekle", type="primary"):
+        name = st.text_input("Hemşire adı soyadı", placeholder="Örn: Ayşe Yılmaz", key="staff_name")
+        if st.button("Ekle", type="primary", key="staff_add_one"):
             add_staff(name)
             st.success("Eklendi ✅")
             st.rerun()
@@ -52,9 +51,10 @@ with tab_staff:
         bulk = st.text_area(
             "Her satıra 1 isim yaz",
             height=200,
-            placeholder="Ayşe Yılmaz\nElif Demir\n..."
+            placeholder="Ayşe Yılmaz\nElif Demir\n...",
+            key="staff_bulk"
         )
-        if st.button("Toplu Ekle"):
+        if st.button("Toplu Ekle", key="staff_add_bulk"):
             names = [n.strip() for n in bulk.splitlines() if n.strip()]
             count = add_staff_bulk(names)
             st.success(f"{count} kişi eklendi ✅")
@@ -63,7 +63,6 @@ with tab_staff:
     with col2:
         st.markdown("### Liste")
         filter_opt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="staff_filter")
-
         only_active = None
         if filter_opt == "Aktif":
             only_active = True
@@ -159,6 +158,7 @@ with tab_req:
         selected_label = st.selectbox("Personel seç (şimdilik login yerine)", list(staff_map.keys()), key="req_staff")
         staff_id = staff_map[selected_label]
 
+        req_kind = st.selectbox("İstek tipi", ["HARD", "SOFT"], index=0, key="req_kind")
         req_day = st.date_input("İstek günü", value=date.today() + timedelta(days=14), key="req_day")
         req_note = st.text_area(
             "İstek notu",
@@ -175,7 +175,7 @@ with tab_req:
             )
 
         if st.button("İstek Kaydet", type="primary", key="req_save"):
-            add_request(staff_id, req_day.isoformat(), req_note)
+            add_request(staff_id, req_day.isoformat(), req_note, req_kind)
             st.success("İstek kaydedildi ✅")
             st.rerun()
 
@@ -189,7 +189,7 @@ with tab_req:
             "Durum filtresi",
             ["Hepsi", "Beklemede", "Onaylandı", "Reddedildi"],
             horizontal=True,
-            key="req_filter"
+            key="req_filter_status"
         )
         status = None if filter_status == "Hepsi" else status_label_map[filter_status]
         reqs = list_requests(status=status)
@@ -199,8 +199,13 @@ with tab_req:
         else:
             for r in reqs:
                 rid = int(r["id"])
-                st.write(f'**{r["date"]}** — {r["full_name"]} — **{status_tr_map.get(r["status"], r["status"])}**')
+                kind = (r.get("request_kind") or "HARD").upper()
+                st.write(
+                    f'**{r["date"]}** — {r["full_name"]} — '
+                    f'**{status_tr_map.get(r["status"], r["status"])}**  |  Tip: `{kind}`'
+                )
                 st.caption(f'{r["note"]}  |  Oluşturma: {r["created_at"]}')
+
                 c1, c2, c3 = st.columns([1, 1, 1])
                 with c1:
                     if st.button("Onayla", key=f"req_ok_{rid}"):
@@ -214,6 +219,8 @@ with tab_req:
                     if st.button("Sil", key=f"req_del_{rid}"):
                         delete_request(rid)
                         st.rerun()
+
+        st.info("Not: Onaylı HARD istekler planlamada 'kesin boş' (hard). Onaylı SOFT istekler ise mümkünse boş bırakılır.")
 
 # -------------------- TAKVİM & TATİLLER --------------------
 with tab_cal:
@@ -260,18 +267,20 @@ with tab_rules:
 
     c1, c2, c3 = st.columns([2, 2, 4])
     with c1:
-        prev_type = st.selectbox("Dün (Prev)", ["DAY", "NIGHT", "D24", "RAPOR", "YILLIK_IZIN", "ANY"], index=1)
-
+        prev_type = st.selectbox(
+            "Dün (Prev)",
+            ["DAY", "NIGHT", "D24", "RAPOR", "YILLIK_IZIN", "ANY"],
+            index=1,
+            key="rule_prev"
+        )
     with c2:
-        next_type = st.selectbox("Bugün (Next)", ["DAY", "NIGHT", "D24", "ANY"], index=3)
+        next_type = st.selectbox("Bugün (Next)", ["DAY", "NIGHT", "D24", "ANY"], index=3, key="rule_next")
     with c3:
         apply_day = st.selectbox("Hangi günlerde geçerli?", ["ANY", "WEEKDAY", "WEEKEND"], index=0, key="rule_apply_day")
+        note = st.text_input("Not (opsiyonel)", placeholder="Örn: 24 sonrası ertesi gün çalışma yok", key="rule_note")
 
-        note = st.text_input("Not (opsiyonel)", placeholder="Örn: 24 sonrası ertesi gün çalışma yok")
-
-    if st.button("Kural Ekle", type="primary"):
+    if st.button("Kural Ekle", type="primary", key="rule_add"):
         add_rule(prev_type, next_type, apply_day, note)
-
         st.success("Kural eklendi ✅")
         st.rerun()
 
@@ -279,7 +288,6 @@ with tab_rules:
     st.markdown("### Kural Listesi")
 
     filt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="rules_filter_rules_tab")
-
     if filt == "Aktif":
         rows = list_rules(active_only=True)
     elif filt == "Pasif":
@@ -295,8 +303,10 @@ with tab_rules:
             is_active = bool(r["is_active"])
             label = "✅ Aktif" if is_active else "⛔ Pasif"
             ad = r.get("apply_day", "ANY")
-            st.write(f'**#{rid}**  {label}  —  `{r["prev_type"]} -> {r["next_type"]}`  (Gün: **{ad}**)  {(" | " + r["note"]) if r["note"] else ""}')
-
+            st.write(
+                f'**#{rid}**  {label}  —  `{r["prev_type"]} -> {r["next_type"]}`  '
+                f'(Gün: **{ad}**)  {(" | " + r["note"]) if r["note"] else ""}'
+            )
 
             b1, b2, b3 = st.columns([1, 1, 1])
             with b1:
@@ -317,7 +327,7 @@ with tab_rules:
 
 # -------------------- PLAN --------------------
 with tab_plan:
-    st.subheader("Plan (Basit v0 + HARD min mesai + DB kuralları)")
+    st.subheader("Plan (Basit v0 + HARD min mesai + Kurallar + İstekler)")
 
     today = date.today()
     c1, c2 = st.columns(2)
@@ -341,18 +351,57 @@ with tab_plan:
         min_required_hours = weekday_count * 8
         st.info(f"Hard kural: Her çalışan en az **{min_required_hours} saat** çalışmalı.")
 
+        # ---- Onaylı istekler (HARD/SOFT) ----
+        st.markdown("---")
+        st.markdown("### ✅ Onaylı İstekler (HARD / SOFT)")
+        approved = list_approved_requests(int(year), int(month))
+        if not approved:
+            st.info("Bu ay için onaylı istek yok.")
+        else:
+            for r in approved:
+                kind = (r.get("request_kind") or "HARD").upper()
+                st.write(f'**{r["date"]}** — {r["full_name"]} — Tip: `{kind}`')
+                if r.get("note"):
+                    st.caption(r["note"])
+
+        # ---- SOFT isteğe rağmen atananlar (şeffaflık) ----
+        st.markdown("### ⚠️ SOFT isteğe rağmen atananlar")
+        # Mevcut plan varsa kontrol edelim
+        plan_rows_now = list_month(int(year), int(month))
+        if not plan_rows_now:
+            st.info("Önce plan üretince burada SOFT çatışmalarını göstereceğim.")
+        else:
+            assigned_set = {(r["date"], int(r["staff_id"])) for r in plan_rows_now}
+            soft_conflicts = []
+            for r in approved:
+                kind = (r.get("request_kind") or "HARD").upper()
+                if kind == "SOFT":
+                    if (r["date"], int(r["staff_id"])) in assigned_set:
+                        soft_conflicts.append(r)
+
+            if not soft_conflicts:
+                st.success("SOFT isteklerle çakışan atama yok ✅ (mümkün olduğunca boş bırakıldı)")
+            else:
+                st.warning(f"SOFT isteğe rağmen atanan kişi sayısı: {len(soft_conflicts)}")
+                for r in soft_conflicts:
+                    st.write(f'**{r["date"]}** — {r["full_name"]} — Tip: `SOFT` (ama atanmış)')
+                    if r.get("note"):
+                        st.caption(r["note"])
+
+
         transition_rules = list_rules(active_only=True)
         st.write(f"Aktif geçiş kuralı sayısı: **{len(transition_rules)}**")
 
         if st.button("Plan Üret (Hard min)", type="primary", key="plan_btn"):
-            blocked_any, blocked_type = build_blocked_days_with_type()
+            # blockers: rapor/izin + approved HARD istek + approved SOFT istek (soft_avoid)
+            blocked_any, blocked_type, soft_avoid = build_blocked_days_with_type(int(year), int(month))
 
             assignments, unfilled, hours, swaps = generate_schedule_hard_min_hours(
-           int(year), int(month), staff_ids, blocked_any, min_required_hours,
-           transition_rules=transition_rules,
-           blocked_type=blocked_type
-        )
-
+                int(year), int(month), staff_ids, blocked_any, min_required_hours,
+                transition_rules=transition_rules,
+                blocked_type=blocked_type,
+                soft_avoid=soft_avoid
+            )
 
             clear_month(int(year), int(month))
             insert_assignments(assignments)
@@ -379,7 +428,6 @@ with tab_plan:
             st.info("Bu ay için plan yok. 'Plan Üret' butonuna bas.")
         else:
             st.markdown("### Mesai Özeti (kişi bazlı)")
-
             total_hours = {sid: 0 for sid in staff_ids}
             for r in rows:
                 sid = int(r["staff_id"])
@@ -399,6 +447,7 @@ with tab_plan:
 
             st.markdown("---")
 
+            # Gün gün yazdırma (isimler alt alta)
             by_day = {}
             for r in rows:
                 d = r["date"]

@@ -31,7 +31,6 @@ def _prev_day_iso(day_iso: str) -> str:
     return (date.fromisoformat(day_iso) - timedelta(days=1)).isoformat()
 
 def _is_weekend(day_iso: str) -> bool:
-    # Monday=0 ... Sunday=6, weekend: 5-6
     return date.fromisoformat(day_iso).weekday() >= 5
 
 def _day_kind(day_iso: str) -> str:
@@ -63,7 +62,6 @@ def _match(rule_val: str, actual: str) -> bool:
     return rule_val == "ANY" or rule_val == actual
 
 def _match_day(rule_day: str, cur_day_iso: str) -> bool:
-    # rule_day: ANY | WEEKDAY | WEEKEND
     if rule_day == "ANY":
         return True
     return rule_day == _day_kind(cur_day_iso)
@@ -73,11 +71,9 @@ def _violates_transition_rules(prev: ShiftType | None, cur: ShiftType, cur_day_i
         return False
 
     for r in transition_rules:
-        # apply_day yoksa ANY varsay
         apply_day = r.get("apply_day", "ANY")
         if not _match_day(apply_day, cur_day_iso):
             continue
-
         if _match(r["prev_type"], prev) and _match(r["next_type"], cur):
             return True
 
@@ -92,22 +88,20 @@ def can_assign(
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
 ) -> bool:
     transition_rules = transition_rules or []
-
     day = shift.day
     stype = shift.shift_type
 
-    # Bugün rapor/izin ise çalışamaz
+    # Hard block
     if day in blocked_any.get(staff_id, set()):
         return False
 
-    # Aynı gün çift vardiya yok
+    # aynı gün çift vardiya yok
     for sid, _s in assigned_by_day.get(day, []):
         if sid == staff_id:
             return False
 
     prev = _get_prev_shift_type(staff_id, day, assigned_by_day, blocked_type=blocked_type)
 
-    # DB geçiş kuralları + hafta içi/sonu filtresi
     if _violates_transition_rules(prev, stype, day, transition_rules):
         return False
 
@@ -132,16 +126,23 @@ def generate_schedule(
     blocked_any: Dict[int, Set[str]],
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
+    soft_avoid: Optional[Dict[int, Set[str]]] = None,
 ) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift]]:
     required = build_required_shifts(year, month)
     counts = {sid: 0 for sid in staff_ids}
     assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]] = {}
+    soft_avoid = soft_avoid or {}
 
     assignments: List[Tuple[str, ShiftType, int]] = []
     unfilled: List[Shift] = []
 
     for sh in required:
-        candidates = sorted(staff_ids, key=lambda x: counts.get(x, 0))
+        def score(sid: int):
+            penalty = 1 if sh.day in soft_avoid.get(sid, set()) else 0
+            return (penalty, counts.get(sid, 0))
+
+        candidates = sorted(staff_ids, key=score)
+
         picked = None
         for sid in candidates:
             if can_assign(
@@ -252,11 +253,13 @@ def generate_schedule_hard_min_hours(
     min_required_hours: int,
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
+    soft_avoid: Optional[Dict[int, Set[str]]] = None,
 ) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], Dict[int, int], int]:
     assignments, unfilled = generate_schedule(
         year, month, staff_ids, blocked_any,
         transition_rules=transition_rules,
-        blocked_type=blocked_type
+        blocked_type=blocked_type,
+        soft_avoid=soft_avoid
     )
     assignments, hours, swaps = repair_to_meet_min_hours(
         year, month, assignments, staff_ids, blocked_any, min_required_hours,
