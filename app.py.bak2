@@ -406,9 +406,6 @@ with tab_plan:
             )
 
             clear_month(int(year), int(month))
-            # FIX: normalize assignments (tuple -> dict) before DB insert
-            if assignments and isinstance(assignments[0], (tuple, list)):
-                assignments = [{"date": a[0], "shift_type": a[1], "staff_id": a[2]} for a in assignments]
             insert_assignments(assignments)
 
             if unfilled:
@@ -435,61 +432,18 @@ with tab_plan:
 
             # === MATRIX_VIEW_START ===
             st.markdown("---")
-            st.markdown("### 📊 Aylık Çizelge (Sadece Yazı Rengi)")
+            st.markdown("### 📊 Aylık Çizelge (Excel Görünümü)")
 
-            # blocked_type (rapor / yıllık izin) unavailability tablosundan üret (ROBUST)
-            blocked_type = {}
-            unav_count = 0
-            yyyymm = f"{int(year)}-{int(month):02d}-"
-
-            # name->id dönüşümü (lokal)
-            name_to_id_local = {v: k for k, v in staff_name_by_id.items()}
-
-            def _as_dict(x):
-                # sqlite Row gibi ise dict() çalışır; değilse zaten dict olabilir
-                try:
-                    return dict(x)
-                except Exception:
-                    return x if isinstance(x, dict) else {}
-
+            # Resmî tatiller (gri)
             try:
-                unav_rows = list_unavailability(None)
+                holiday_set = set(list_holidays())
+            except Exception:
+                holiday_set = set()
 
-                for ur0 in unav_rows:
-                    ur = _as_dict(ur0)
-
-                    # date bazen "date" bazen "day" olabilir
-                    d = ur.get("date") or ur.get("day")
-                    if not d:
-                        continue
-                    d = str(d)
-                    # bazı DB'lerde "2026-02-01 00:00:00" gibi gelebilir
-                    d = d.split(" ")[0].split("T")[0]
-
-                    if not d.startswith(yyyymm):
-                        continue
-
-                    sid = ur.get("staff_id")
-                    if sid is None:
-                        sid = name_to_id_local.get(ur.get("full_name"))
-                    if sid is None:
-                        continue
-                    sid = int(sid)
-
-                    t = ur.get("type") or ur.get("utype")
-                    if t not in ("rapor", "yillik_izin"):
-                        continue
-
-                    blocked_type.setdefault(sid, {})[d] = t
-                    unav_count += 1
-
-            except Exception as e:
+            # blocked_type yoksa boş kabul et
+            if "blocked_type" not in locals() or blocked_type is None:
                 blocked_type = {}
-                unav_count = 0
-                st.warning(f"Rapor/izin okunamadı: {e}")
 
-            st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
-            
             name_to_id = {v: k for k, v in staff_name_by_id.items()}
 
             # Ay günleri: 01..(ayın son günü)
@@ -498,12 +452,21 @@ with tab_plan:
             day_cols = [str(int(d.iso.split("-")[2])).zfill(2) for d in day_infos]  # 01..31
             col_to_iso = {c: iso for c, iso in zip(day_cols, day_isos)}
 
+            # Hafta sonu / resmi tatil kolonları
+            weekend_or_holiday_cols = set()
+            for c in day_cols:
+                iso = col_to_iso[c]
+                y, m, d = map(int, iso.split("-"))
+                wd = date(y, m, d).weekday()  # 0=Mon ... 5=Sat,6=Sun
+                if wd >= 5 or iso in holiday_set:
+                    weekend_or_holiday_cols.add(c)
+
             # Personel listesi
             staff_df = pd.DataFrame(
                 [{"Personel": staff_name_by_id.get(sid, f"ID:{sid}"), "ID": sid} for sid in staff_ids]
             ).sort_values(["Personel", "ID"]).reset_index(drop=True)
 
-            # Hücre: (staff_id, date)->shift_type
+            # Hücre: (staff_id, date)->shift
             cell = {}
             for r in rows:
                 sid = r.get("staff_id")
@@ -524,35 +487,24 @@ with tab_plan:
                 else:
                     cell.setdefault(key, stype)
 
-            # Matris tablo (DAY=8, NIGHT=16, D24=24, RAPOR=R, İZİN=İ)
+            # Matris tablo
             matrix_rows = []
             for _, rr in staff_df.iterrows():
                 sid = int(rr["ID"])
                 row = {"Personel": rr["Personel"], "ID": sid}
-
                 for d_iso, dcol in zip(day_isos, day_cols):
                     bt = blocked_type.get(sid, {}).get(d_iso)
                     if bt == "rapor":
-                        row[dcol] = "R"
-                        continue
-                    if bt == "yillik_izin":
-                        row[dcol] = "İ"
-                        continue
-
-                    stype = cell.get((sid, d_iso), "")
-                    if stype.startswith("DAY"):
-                        row[dcol] = "8"
-                    elif stype.startswith("NIGHT"):
-                        row[dcol] = "16"
-                    elif stype.startswith("D24"):
-                        row[dcol] = "24"
+                        row[dcol] = "RAPOR"
+                    elif bt == "yillik_izin":
+                        row[dcol] = "İZİN"
                     else:
-                        row[dcol] = ""
+                        row[dcol] = cell.get((sid, d_iso), "")
                 matrix_rows.append(row)
 
             df_matrix = pd.DataFrame(matrix_rows)
 
-            # Açıklama: rapor/izin gün sayısı (EN SON sütun)
+            # Açıklama: rapor/izin gün sayısı
             aciklama = []
             for sid in df_matrix["ID"].tolist():
                 sid = int(sid)
@@ -560,74 +512,85 @@ with tab_plan:
                 rapor = sum(1 for _, t in mp.items() if t == "rapor")
                 izin  = sum(1 for _, t in mp.items() if t == "yillik_izin")
                 parts = []
-                if rapor:
-                    parts.append(f"{rapor} gün raporlu")
                 if izin:
-                    parts.append(f"{izin} gün izinli")
+                    parts.append(f"Yıllık izin: {izin} gün")
+                if rapor:
+                    parts.append(f"Rapor: {rapor} gün")
                 aciklama.append(" | ".join(parts) if parts else "")
             df_matrix["Açıklama"] = aciklama
 
-            # ===== MESAI OZETI SUTUNLARI =====
-            # Min saat: (tatiller hariç) hafta içi gün sayısı × 8
+            # Min/Toplam/Fark
             min_required_hours = weekday_count * 8
-
-            # Çalışılan saat: DB'deki rows (shift_type) üzerinden hesapla
-            HOURS_MAP = {"DAY": 8, "NIGHT": 16, "D24": 24}
-
             worked = {sid: 0 for sid in staff_ids}
-            for rr in rows:
-                sid = rr.get("staff_id")
+            for r in rows:
+                sid = r.get("staff_id")
                 if sid is None:
-                    sid = name_to_id.get(rr.get("full_name"))
+                    sid = name_to_id.get(r.get("full_name"))
                 if sid is None:
                     continue
                 sid = int(sid)
-
-                stype = (rr.get("shift_type") or "")
-                # bazen "DAY+NIGHT" gibi birleşik olabilir
-                parts = str(stype).split("+")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("DAY"):
-                        worked[sid] += HOURS_MAP["DAY"]
-                    elif part.startswith("NIGHT"):
-                        worked[sid] += HOURS_MAP["NIGHT"]
-                    elif part.startswith("D24"):
-                        worked[sid] += HOURS_MAP["D24"]
+                worked[sid] += SHIFT_HOURS.get(r.get("shift_type", ""), 0)
 
             df_matrix["MinSaat"] = min_required_hours
             df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
             df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
-            # ===== /MESAI OZETI =====
 
-
-            # Kolon sırası: Açıklama en sonda
-            ordered_cols = ["Personel", "ID"] + day_cols + ["MinSaat", "CalistigiSaat", "Fark", "Açıklama"]
+            # Sıralama
+            ordered_cols = ["Personel", "ID"] + day_cols + ["Açıklama", "MinSaat", "CalistigiSaat", "Fark"]
             df_matrix = df_matrix[ordered_cols]
 
-            # Sadece YAZI rengi (arka plan değiştirme YOK)
-            COLOR_DAY   = "#2F75B5"  # mavi
-            COLOR_NIGHT = "#C9A100"  # sarı (daha okunur)
-            COLOR_D24   = "#2E8B57"  # yeşil
-            COLOR_BLOCK = "#C00000"  # kırmızı
+            # RENKLER
+            COLOR_DAY   = "#b3d9ff"  # mavi
+            COLOR_NIGHT = "#ffe699"  # sarı
+            COLOR_D24   = "#b6e3b6"  # yeşil
+            COLOR_BLOCK = "#ff9999"  # kırmızı
+            COLOR_OFF   = "#e6e6e6"  # gri
 
-            def style_text_only(data: pd.DataFrame):
+            def bg(color):
+                return f"background-color: {color};"
+
+            def diag_mix(c1, c2):
+                return f"background: linear-gradient(135deg, {c1} 0%, {c1} 50%, {c2} 50%, {c2} 100%);"
+
+            def style_cells(data: pd.DataFrame):
                 styles = pd.DataFrame("", index=data.index, columns=data.columns)
+
                 for c in day_cols:
+                    iso = col_to_iso[c]
+                    is_off = (c in weekend_or_holiday_cols)
                     for i in data.index:
-                        v = str(data.loc[i, c] or "")
-                        if v == "8":
-                            styles.loc[i, c] = f"color: {COLOR_DAY};"
-                        elif v == "16":
-                            styles.loc[i, c] = f"color: {COLOR_NIGHT};"
-                        elif v == "24":
-                            styles.loc[i, c] = f"color: {COLOR_D24};"
-                        elif v in ("R", "İ"):
-                            styles.loc[i, c] = f"color: {COLOR_BLOCK};"
+                        sid = int(data.loc[i, "ID"])
+                        val = str(data.loc[i, c] or "")
+
+                        # RAPOR/İZİN kırmızı (en öncelik)
+                        bt = blocked_type.get(sid, {}).get(iso)
+                        if bt in ("rapor", "yillik_izin") or val in ("RAPOR", "İZİN"):
+                            styles.loc[i, c] = bg(COLOR_BLOCK) + "font-weight:700;"
+                            continue
+
+                        shift_color = None
+                        if val.startswith("DAY"):
+                            shift_color = COLOR_DAY
+                        elif val.startswith("NIGHT"):
+                            shift_color = COLOR_NIGHT
+                        elif val.startswith("D24"):
+                            shift_color = COLOR_D24
+
+                        if is_off and shift_color:
+                            styles.loc[i, c] = diag_mix(COLOR_OFF, shift_color)
+                        elif shift_color:
+                            styles.loc[i, c] = bg(shift_color)
+                        elif is_off:
+                            styles.loc[i, c] = bg(COLOR_OFF)
+
+                # Sağ özet alanını hafif gri
+                for col in ["Açıklama", "MinSaat", "CalistigiSaat", "Fark"]:
+                    if col in data.columns:
+                        styles[col] = bg("#f5f5f5")
                 return styles
 
-            styler = df_matrix.style.apply(style_text_only, axis=None)
-            st.dataframe(styler, width='stretch', height=680)
+            styler = df_matrix.style.apply(style_cells, axis=None)
+            st.dataframe(styler, use_container_width=True, height=680)
 
             st.markdown("### ⬇️ Çizelgeyi İndir (CSV / Excel)")
             st.download_button(

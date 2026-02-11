@@ -406,9 +406,6 @@ with tab_plan:
             )
 
             clear_month(int(year), int(month))
-            # FIX: normalize assignments (tuple -> dict) before DB insert
-            if assignments and isinstance(assignments[0], (tuple, list)):
-                assignments = [{"date": a[0], "shift_type": a[1], "staff_id": a[2]} for a in assignments]
             insert_assignments(assignments)
 
             if unfilled:
@@ -437,59 +434,10 @@ with tab_plan:
             st.markdown("---")
             st.markdown("### 📊 Aylık Çizelge (Sadece Yazı Rengi)")
 
-            # blocked_type (rapor / yıllık izin) unavailability tablosundan üret (ROBUST)
-            blocked_type = {}
-            unav_count = 0
-            yyyymm = f"{int(year)}-{int(month):02d}-"
-
-            # name->id dönüşümü (lokal)
-            name_to_id_local = {v: k for k, v in staff_name_by_id.items()}
-
-            def _as_dict(x):
-                # sqlite Row gibi ise dict() çalışır; değilse zaten dict olabilir
-                try:
-                    return dict(x)
-                except Exception:
-                    return x if isinstance(x, dict) else {}
-
-            try:
-                unav_rows = list_unavailability(None)
-
-                for ur0 in unav_rows:
-                    ur = _as_dict(ur0)
-
-                    # date bazen "date" bazen "day" olabilir
-                    d = ur.get("date") or ur.get("day")
-                    if not d:
-                        continue
-                    d = str(d)
-                    # bazı DB'lerde "2026-02-01 00:00:00" gibi gelebilir
-                    d = d.split(" ")[0].split("T")[0]
-
-                    if not d.startswith(yyyymm):
-                        continue
-
-                    sid = ur.get("staff_id")
-                    if sid is None:
-                        sid = name_to_id_local.get(ur.get("full_name"))
-                    if sid is None:
-                        continue
-                    sid = int(sid)
-
-                    t = ur.get("type") or ur.get("utype")
-                    if t not in ("rapor", "yillik_izin"):
-                        continue
-
-                    blocked_type.setdefault(sid, {})[d] = t
-                    unav_count += 1
-
-            except Exception as e:
+            # blocked_type yoksa boş kabul et
+            if "blocked_type" not in locals() or blocked_type is None:
                 blocked_type = {}
-                unav_count = 0
-                st.warning(f"Rapor/izin okunamadı: {e}")
 
-            st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
-            
             name_to_id = {v: k for k, v in staff_name_by_id.items()}
 
             # Ay günleri: 01..(ayın son günü)
@@ -567,42 +515,8 @@ with tab_plan:
                 aciklama.append(" | ".join(parts) if parts else "")
             df_matrix["Açıklama"] = aciklama
 
-            # ===== MESAI OZETI SUTUNLARI =====
-            # Min saat: (tatiller hariç) hafta içi gün sayısı × 8
-            min_required_hours = weekday_count * 8
-
-            # Çalışılan saat: DB'deki rows (shift_type) üzerinden hesapla
-            HOURS_MAP = {"DAY": 8, "NIGHT": 16, "D24": 24}
-
-            worked = {sid: 0 for sid in staff_ids}
-            for rr in rows:
-                sid = rr.get("staff_id")
-                if sid is None:
-                    sid = name_to_id.get(rr.get("full_name"))
-                if sid is None:
-                    continue
-                sid = int(sid)
-
-                stype = (rr.get("shift_type") or "")
-                # bazen "DAY+NIGHT" gibi birleşik olabilir
-                parts = str(stype).split("+")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("DAY"):
-                        worked[sid] += HOURS_MAP["DAY"]
-                    elif part.startswith("NIGHT"):
-                        worked[sid] += HOURS_MAP["NIGHT"]
-                    elif part.startswith("D24"):
-                        worked[sid] += HOURS_MAP["D24"]
-
-            df_matrix["MinSaat"] = min_required_hours
-            df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
-            df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
-            # ===== /MESAI OZETI =====
-
-
             # Kolon sırası: Açıklama en sonda
-            ordered_cols = ["Personel", "ID"] + day_cols + ["MinSaat", "CalistigiSaat", "Fark", "Açıklama"]
+            ordered_cols = ["Personel", "ID"] + day_cols + ["Açıklama"]
             df_matrix = df_matrix[ordered_cols]
 
             # Sadece YAZI rengi (arka plan değiştirme YOK)
@@ -627,7 +541,7 @@ with tab_plan:
                 return styles
 
             styler = df_matrix.style.apply(style_text_only, axis=None)
-            st.dataframe(styler, width='stretch', height=680)
+            st.dataframe(styler, use_container_width=True, height=680)
 
             st.markdown("### ⬇️ Çizelgeyi İndir (CSV / Excel)")
             st.download_button(
