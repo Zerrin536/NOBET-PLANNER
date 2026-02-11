@@ -390,6 +390,7 @@ with tab_plan:
                     if r.get("note"):
                         st.caption(r["note"])
 
+
         transition_rules = list_rules(active_only=True)
         st.write(f"Aktif geçiş kuralı sayısı: **{len(transition_rules)}**")
 
@@ -483,7 +484,6 @@ with tab_plan:
                     unav_count += 1
 
             except Exception as e:
-                st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
                 blocked_type = {}
                 unav_count = 0
                 st.warning(f"Rapor/izin okunamadı: {e}")
@@ -600,6 +600,7 @@ with tab_plan:
             df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
             # ===== /MESAI OZETI =====
 
+
             # Kolon sırası: Açıklama en sonda
             ordered_cols = ["Personel", "ID"] + day_cols + ["MinSaat", "CalistigiSaat", "Fark", "Açıklama"]
             df_matrix = df_matrix[ordered_cols]
@@ -637,57 +638,60 @@ with tab_plan:
                 key="dl_matrix_csv"
             )
 
-            # === EXCEL_EXPORT_START ===
             xlsx_buf = io.BytesIO()
             try:
-                from openpyxl.styles import Font
-                from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
 
-                # Excel: sadece YAZI rengi (arka plan yok)
-                FONT_DAY   = Font(color="2F75B5")  # mavi
-                FONT_NIGHT = Font(color="C9A100")  # sarı
-                FONT_D24   = Font(color="2E8B57")  # yeşil
-                FONT_BLOCK = Font(color="C00000")  # kırmızı
+    with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
+        df_matrix.to_excel(writer, index=False, sheet_name="Cizelge")
 
-                with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
-                    df_matrix.to_excel(writer, index=False, sheet_name="Cizelge")
-                    ws = writer.sheets["Cizelge"]
+        ws = writer.sheets["Cizelge"]
 
-                    headers = [cell.value for cell in ws[1]]
-                    # gün sütunları: "01","02",...
-                    day_headers = [h for h in headers if isinstance(h, str) and len(h) == 2 and h.isdigit()]
-                    day_cols_idx = [headers.index(h) + 1 for h in day_headers]  # 1-based
+        # Excel hücrelerinde sadece YAZI rengi (arka plan yok)
+        FONT_DAY   = Font(color="2F75B5")  # mavi
+        FONT_NIGHT = Font(color="C9A100")  # sarı
+        FONT_D24   = Font(color="2E8B57")  # yeşil
+        FONT_BLOCK = Font(color="C00000")  # kırmızı
 
-                    for r in range(2, ws.max_row + 1):
-                        for c in day_cols_idx:
-                            v = ws.cell(row=r, column=c).value
-                            if v is None:
-                                continue
-                            v = str(v).strip()
-                            if v == "8":
-                                ws.cell(row=r, column=c).font = FONT_DAY
-                            elif v == "16":
-                                ws.cell(row=r, column=c).font = FONT_NIGHT
-                            elif v == "24":
-                                ws.cell(row=r, column=c).font = FONT_D24
-                            elif v in ("R", "İ"):
-                                ws.cell(row=r, column=c).font = FONT_BLOCK
+        # header satırı 1, data satırları 2..n
+        # sütun indexlerini bul (Personel, ID, günler, Açıklama...)
+        headers = [cell.value for cell in ws[1]]
+        # gün sütunları: "01","02",...
+        day_cols = [h for h in headers if isinstance(h, str) and len(h) == 2 and h.isdigit()]
+        day_col_indexes = [headers.index(h) + 1 for h in day_cols]  # 1-based
 
-                    for col_idx in range(1, ws.max_column + 1):
-                        ws.column_dimensions[get_column_letter(col_idx)].width = 10
+        # Gün hücrelerini renklendir
+        for row in range(2, ws.max_row + 1):
+            for col in day_col_indexes:
+                v = ws.cell(row=row, column=col).value
+                if v is None:
+                    continue
+                v = str(v).strip()
+                if v == "8":
+                    ws.cell(row=row, column=col).font = FONT_DAY
+                elif v == "16":
+                    ws.cell(row=row, column=col).font = FONT_NIGHT
+                elif v == "24":
+                    ws.cell(row=row, column=col).font = FONT_D24
+                elif v in ("R", "İ"):
+                    ws.cell(row=row, column=col).font = FONT_BLOCK
 
-                xlsx_buf.seek(0)
-                st.download_button(
-                    "📊 Excel indir (.xlsx)",
-                    data=xlsx_buf,
-                    file_name=f"cizelge_{int(year)}_{int(month):02d}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_matrix_xlsx"
-                )
+        # (opsiyonel) sütun genişliği biraz artsın
+        for col_idx in range(1, ws.max_column + 1):
+            col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].width = 10
+
+    xlsx_buf.seek(0)
+    st.download_button(
+        "📊 Excel indir (.xlsx)",
+        data=xlsx_buf,
+        file_name=f"cizelge_{int(year)}_{int(month):02d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_matrix_xlsx"
+    )
             except Exception as e:
-                st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
-
-            # === EXCEL_EXPORT_END ===
+            st.warning(f"Excel export çalışmadı: {e} (CSV her zaman çalışır)")
 
 # === MATRIX_VIEW_END ===
 
