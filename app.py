@@ -1,4 +1,6 @@
 import streamlit as st
+import io
+import pandas as pd
 from datetime import date, timedelta
 
 from src.db import init_db
@@ -427,67 +429,98 @@ with tab_plan:
         if not rows:
             st.info("Bu ay için plan yok. 'Plan Üret' butonuna bas.")
         else:
-            st.markdown("### Mesai Özeti (kişi bazlı)")
-            total_hours = {sid: 0 for sid in staff_ids}
-            for r in rows:
-                sid = int(r["staff_id"])
-                total_hours[sid] += SHIFT_HOURS.get(r["shift_type"], 0)
 
-            summary = []
-            for sid in staff_ids:
-                total = total_hours.get(sid, 0)
-                diff = total - min_required_hours
-                summary.append((staff_name_by_id.get(sid, f"ID:{sid}"), sid, total, min_required_hours, diff))
-
-            summary.sort(key=lambda x: x[4])
-            st.write("**Ad Soyad | ID | Toplam Saat | Minimum Saat | Fark (+fazla / -eksik)**")
-            for name, sid, total, min_req, diff in summary:
-                sign = "+" if diff > 0 else ""
-                st.write(f"{name} | {sid} | {total} | {min_req} | {sign}{diff}")
-
+            # === MATRIX_VIEW_START ===
             st.markdown("---")
+            st.markdown("### 📊 Aylık Çizelge (Excel Görünümü)")
 
-            # Gün gün yazdırma (isimler alt alta)
-            by_day = {}
-            for r in rows:
-                d = r["date"]
-                stype = r["shift_type"]
-                name = r["full_name"]
-                by_day.setdefault(d, {}).setdefault(stype, []).append(name)
+            name_to_id = {v: k for k, v in staff_name_by_id.items()}
+
+            df_plan = pd.DataFrame(rows)
 
             day_infos = iter_month_days(int(year), int(month))
-            weekday_names = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+            day_isos = [d.iso for d in day_infos]
+            day_cols = [str(int(d.iso.split("-")[2])).zfill(2) for d in day_infos]  # 01..31
 
-            for info in day_infos:
-                d = info.iso
-                w = weekday_names[info.weekday]
-                is_weekend = info.is_weekend
+            staff_df = pd.DataFrame(
+                [{"Personel": staff_name_by_id.get(sid, f"ID:{sid}"), "ID": sid} for sid in staff_ids]
+            ).sort_values(["Personel", "ID"]).reset_index(drop=True)
 
-                st.markdown(f"#### {d} ({w})" + (" — **Hafta sonu**" if is_weekend else ""))
+            # Hücre: (staff_id, date) -> shift_type
+            cell = {}
+            for r in rows:
+                sid = r.get("staff_id")
+                if sid is None:
+                    sid = name_to_id.get(r.get("full_name"))
+                if sid is None:
+                    continue
+                sid = int(sid)
 
-                shifts = by_day.get(d, {})
+                d_iso = r.get("date")
+                stype = r.get("shift_type")
+                if not d_iso or not stype:
+                    continue
 
-                if is_weekend:
-                    names_24 = sorted(shifts.get("D24", []))
-                    st.write("**24 (08:00–08:00)**")
-                    if names_24:
-                        st.text("\n".join(names_24))
-                    else:
-                        st.warning("24 vardiyası boş.")
+                key = (sid, d_iso)
+                if key in cell and stype not in cell[key].split("+"):
+                    cell[key] = cell[key] + "+" + stype
                 else:
-                    names_day = sorted(shifts.get("DAY", []))
-                    names_night = sorted(shifts.get("NIGHT", []))
+                    cell.setdefault(key, stype)
 
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.write("**Gündüz (08:00–16:00)**")
-                        if names_day:
-                            st.text("\n".join(names_day))
-                        else:
-                            st.warning("Gündüz boş.")
-                    with c2:
-                        st.write("**Gece (16:00–08:00)**")
-                        if names_night:
-                            st.text("\n".join(names_night))
-                        else:
-                            st.warning("Gece boş.")
+            matrix_rows = []
+            for _, rr in staff_df.iterrows():
+                sid = int(rr["ID"])
+                row = {"Personel": rr["Personel"], "ID": sid}
+                for d_iso, dcol in zip(day_isos, day_cols):
+                    row[dcol] = cell.get((sid, d_iso), "")
+                matrix_rows.append(row)
+
+            df_matrix = pd.DataFrame(matrix_rows)
+
+            # Min/Toplam/Fark
+            min_required_hours = weekday_count * 8
+            worked = {sid: 0 for sid in staff_ids}
+            for r in rows:
+                sid = r.get("staff_id")
+                if sid is None:
+                    sid = name_to_id.get(r.get("full_name"))
+                if sid is None:
+                    continue
+                sid = int(sid)
+                worked[sid] += SHIFT_HOURS.get(r.get("shift_type", ""), 0)
+
+            df_matrix["MinSaat"] = min_required_hours
+            df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
+            df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
+
+            st.dataframe(df_matrix, use_container_width=True, height=560)
+
+            st.markdown("### ⬇️ Çizelgeyi İndir (CSV / Excel)")
+            st.download_button(
+                "📄 CSV indir (Çizelge)",
+                data=df_matrix.to_csv(index=False).encode("utf-8"),
+                file_name=f"cizelge_{int(year)}_{int(month):02d}.csv",
+                mime="text/csv",
+                key="dl_matrix_csv"
+            )
+
+            xlsx_buf = io.BytesIO()
+            try:
+                with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
+                    df_matrix.to_excel(writer, index=False, sheet_name="Cizelge")
+                xlsx_buf.seek(0)
+                st.download_button(
+                    "📊 Excel indir (.xlsx)",
+                    data=xlsx_buf,
+                    file_name=f"cizelge_{int(year)}_{int(month):02d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_matrix_xlsx"
+                )
+            except Exception as e:
+                st.warning(f"Excel export çalışmadı: {e} (CSV her zaman çalışır)")
+            # === MATRIX_VIEW_END ===
+
+            st.markdown("---")
+            st.caption("Not: Aşağıdaki eski uzun listeyi artık göstermiyoruz; çizelge yukarıda.")
+                
+        # (KALDIRILDI) Eski mesai özeti bloğu silindi.
