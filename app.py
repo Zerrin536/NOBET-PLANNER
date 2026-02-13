@@ -23,6 +23,7 @@ from src.blockers import build_blocked_days_with_type
 from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours, validate_assignments
 from src.assignments_repo import clear_month, insert_assignments, list_month
 from src.rules_repo import ensure_rules_table, add_rule, list_rules, set_rule_active, delete_rule
+from src.rules_presets import PRESETS, apply_preset
 
 st.set_page_config(page_title="Nöbet Planlayıcı", layout="wide")
 init_db()
@@ -266,6 +267,41 @@ with tab_rules:
     st.subheader("Kural Yönetimi (PrevShift → NextShift yasak)")
 
     st.info("Buraya sadece 'YASAK' kuralları ekliyoruz. Serbest olanları eklemen gerekmez.")
+    # --- KURAL SETLERI (Varsayılan / Katı / Esnek) ---
+    st.markdown("### 🧩 Kural Seti Seç (Hazır Preset)")
+
+    preset_name = st.selectbox(
+        "Preset",
+        list(PRESETS.keys()),
+        index=0,
+        key="preset_name"
+    )
+
+    # Katı seçilince varsayılan daha kuralcı gelsin
+    default_deactivate = True if preset_name == "Katı" else False
+    deactivate_others = st.checkbox(
+        "Preset dışındaki aktif kuralları pasif yap (temiz set)",
+        value=default_deactivate,
+        key="preset_deactivate_others"
+    )
+
+    # Preset önizleme
+    try:
+        import pandas as pd
+        df_p = pd.DataFrame(PRESETS.get(preset_name, []))
+        if not df_p.empty:
+            st.dataframe(df_p, width="stretch", height=180)
+    except Exception:
+        pass
+
+    if st.button("✅ Preset'i Uygula", type="primary", key="apply_preset_btn"):
+        touched = apply_preset(preset_name, deactivate_others=deactivate_others)
+        st.success(f"Preset uygulandı ✅ (etkilenen kural: {touched})")
+        st.rerun()
+
+    st.markdown("---")
+    # --- /KURAL SETLERI ---
+
 
     c1, c2, c3 = st.columns([2, 2, 4])
     with c1:
@@ -287,9 +323,20 @@ with tab_rules:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("### Kural Listesi")
+    st.markdown("### 📌 Kural Listesi (Arama + Filtre + Gruplu)")
 
-    filt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="rules_filter_rules_tab")
+    all_rows_for_count = list_rules(active_only=None)
+    active_count = sum(1 for r in all_rows_for_count if bool(r.get("is_active", 1)))
+    st.caption(f"Toplam kural: **{len(all_rows_for_count)}** | Aktif: **{active_count}** | Pasif: **{len(all_rows_for_count) - active_count}**")
+
+    f1, f2, f3 = st.columns([2, 2, 6])
+    with f1:
+        filt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="rules_filter_rules_tab_v2")
+    with f2:
+        group_mode = st.checkbox("Gün tipine göre grupla", value=True, key="rules_group_mode_v2")
+    with f3:
+        q = st.text_input("Kural ara (prev/next/not/gün)", value="", placeholder="örn: gece, 24, izin, hafta içi…", key="rules_search_v2")
+
     if filt == "Aktif":
         rows = list_rules(active_only=True)
     elif filt == "Pasif":
@@ -297,37 +344,63 @@ with tab_rules:
     else:
         rows = list_rules(active_only=None)
 
+    if q.strip():
+        qq = q.strip().lower()
+        def _match_row(r):
+            s = f'{r.get("prev_type","")} {r.get("next_type","")} {r.get("apply_day","")} {r.get("note","")}'.lower()
+            return qq in s
+        rows = [r for r in rows if _match_row(r)]
+
     if not rows:
-        st.info("Henüz kural yok.")
+        st.info("Filtre/arama sonucunda kural bulunamadı.")
     else:
-        for r in rows:
-            rid = int(r["id"])
-            is_active = bool(r["is_active"])
-            label = "✅ Aktif" if is_active else "⛔ Pasif"
-            ad = r.get("apply_day", "ANY")
-            st.write(
-                f'**#{rid}**  {label}  —  `{r["prev_type"]} -> {r["next_type"]}`  '
-                f'(Gün: **{ad}**)  {(" | " + r["note"]) if r["note"] else ""}'
-            )
+        day_tr = {"ANY": "Her gün", "WEEKDAY": "Hafta içi", "WEEKEND": "Hafta sonu"}
 
-            b1, b2, b3 = st.columns([1, 1, 1])
-            with b1:
-                if is_active:
-                    if st.button("Pasif Yap", key=f"rule_off_{rid}"):
-                        set_rule_active(rid, False)
-                        st.rerun()
-                else:
-                    if st.button("Aktif Yap", key=f"rule_on_{rid}"):
-                        set_rule_active(rid, True)
-                        st.rerun()
-            with b2:
-                if st.button("Sil", key=f"rule_del_{rid}"):
-                    delete_rule(rid)
-                    st.rerun()
-            with b3:
-                st.caption(r.get("created_at", ""))
+        def _render_rows(rrs, prefix=""):
+            for r in rrs:
+                rid = int(r["id"])
+                is_active = bool(r.get("is_active", 1))
+                label = "✅ Aktif" if is_active else "⛔ Pasif"
+                ad = r.get("apply_day", "ANY")
+                ad_tr = day_tr.get(ad, ad)
 
-# -------------------- PLAN --------------------
+                st.write(
+                    f'**#{rid}**  {label}  —  `{r.get("prev_type")} -> {r.get("next_type")}`  '
+                    f'(Gün: **{ad_tr}**)  {(" | " + r["note"]) if r.get("note") else ""}'
+                )
+
+                b1, b2, b3 = st.columns([1, 1, 3])
+                with b1:
+                    if is_active:
+                        if st.button("Pasif Yap", key=f"{prefix}rule_off_{rid}_v2"):
+                            set_rule_active(rid, False); st.rerun()
+                    else:
+                        if st.button("Aktif Yap", key=f"{prefix}rule_on_{rid}_v2"):
+                            set_rule_active(rid, True); st.rerun()
+                with b2:
+                    if st.button("Sil", key=f"{prefix}rule_del_{rid}_v2"):
+                        delete_rule(rid); st.rerun()
+                with b3:
+                    st.caption(r.get("created_at", ""))
+
+        if group_mode:
+            any_rows = [r for r in rows if (r.get("apply_day","ANY") == "ANY")]
+            wd_rows  = [r for r in rows if (r.get("apply_day","ANY") == "WEEKDAY")]
+            we_rows  = [r for r in rows if (r.get("apply_day","ANY") == "WEEKEND")]
+
+            with st.expander(f"📅 Her gün ({len(any_rows)})", expanded=True):
+                _render_rows(any_rows, prefix="any_")
+            with st.expander(f"🏙️ Hafta içi ({len(wd_rows)})", expanded=False):
+                _render_rows(wd_rows, prefix="wd_")
+            with st.expander(f"🌙 Hafta sonu ({len(we_rows)})", expanded=False):
+                _render_rows(we_rows, prefix="we_")
+        else:
+            _render_rows(rows, prefix="flat_")
+
+
+
+    st.markdown("---")
+
 with tab_plan:
     st.subheader("Plan (Basit v0 + HARD min mesai + Kurallar + İstekler)")
 

@@ -5,3 +5,5 @@ __pycache__/
 .streamlit/
 nobet_planner.sqlite3
 *.bak_*
+
+*.bak_*
