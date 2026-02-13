@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, List, Tuple, Set, Optional
-from collections import Counter
 
 from src.calendar_utils import iter_month_days
 
@@ -108,93 +107,6 @@ def can_assign(
 
     return True
 
-# -------------------- UNFILLED "NEDEN" ANALİZİ --------------------
-def explain_cannot_assign(
-    staff_id: int,
-    shift: Shift,
-    assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]],
-    blocked_any: Dict[int, Set[str]],
-    transition_rules: List[Dict] | None = None,
-    blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
-) -> List[str]:
-    """
-    Hard gerekçeler üretir. (SOFT istekler burada sayılmaz; çünkü soft sadece ceza)
-    """
-    transition_rules = transition_rules or []
-    day = shift.day
-    stype = shift.shift_type
-
-    reasons: List[str] = []
-
-    # 1) Hard block (rapor/izin/approved-hard istek vs.)
-    if day in blocked_any.get(staff_id, set()):
-        # mümkünse rapor/izin türünü de belirt
-        t = (blocked_type or {}).get(staff_id, {}).get(day)
-        if t == "rapor":
-            reasons.append("RAPORLU")
-        elif t == "yillik_izin":
-            reasons.append("IZINLI")
-        else:
-            reasons.append("HARD_BLOCK")  # hard istek / başka blocker
-        return reasons  # hard block varsa zaten bitti
-
-    # 2) aynı gün zaten atanmış mı?
-    for sid, _s in assigned_by_day.get(day, []):
-        if sid == staff_id:
-            reasons.append("AYNI_GUN_ZATEN_ATANMIS")
-            return reasons
-
-    # 3) geçiş (prev->next) kural ihlali
-    prev = _get_prev_shift_type(staff_id, day, assigned_by_day, blocked_type=blocked_type)
-    if _violates_transition_rules(prev, stype, day, transition_rules):
-        reasons.append("GECIS_KURALI_IHLALI")
-        return reasons
-
-    # burada hala atanamıyorsa, can_assign True olmalıydı
-    reasons.append("BILINMEYEN")
-    return reasons
-
-
-def analyze_unfilled(
-    unfilled: List[Shift],
-    staff_ids: List[int],
-    assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]],
-    blocked_any: Dict[int, Set[str]],
-    transition_rules: List[Dict] | None = None,
-    blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
-) -> List[Dict]:
-    """
-    Her dolmayan slot için: gün, shift, ihtiyaç, atanan, eksik, neden döndürür.
-    """
-    out: List[Dict] = []
-    transition_rules = transition_rules or []
-
-    for sh in unfilled:
-        c = Counter()
-        for sid in staff_ids:
-            rs = explain_cannot_assign(
-                sid, sh, assigned_by_day, blocked_any,
-                transition_rules=transition_rules,
-                blocked_type=blocked_type
-            )
-            if rs:
-                c[rs[0]] += 1
-            else:
-                c["BILINMEYEN"] += 1
-
-        reason_summary = ", ".join([f"{k}:{v}" for k, v in c.most_common(5)])
-
-        out.append({
-            "date": sh.day,
-            "shift_type": sh.shift_type,
-            "need": 1,
-            "assigned": 0,
-            "missing": 1,
-            "reason": reason_summary if reason_summary else "N/A",
-        })
-    return out
-# -------------------- /UNFILLED --------------------
-
 def _build_assigned_by_day(assignments: List[Tuple[str, ShiftType, int]]) -> Dict[str, List[Tuple[int, ShiftType]]]:
     out: Dict[str, List[Tuple[int, ShiftType]]] = {}
     for d, stype, sid in assignments:
@@ -215,7 +127,7 @@ def generate_schedule(
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     soft_avoid: Optional[Dict[int, Set[str]]] = None,
-) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], List[Dict]]:
+) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift]]:
     required = build_required_shifts(year, month)
     counts = {sid: 0 for sid in staff_ids}
     assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]] = {}
@@ -249,14 +161,7 @@ def generate_schedule(
         counts[picked] += 1
         assigned_by_day.setdefault(sh.day, []).append((picked, sh.shift_type))
 
-    # unfilled neden analizi
-    unfilled_debug = analyze_unfilled(
-        unfilled, staff_ids, assigned_by_day, blocked_any,
-        transition_rules=transition_rules,
-        blocked_type=blocked_type
-    )
-
-    return assignments, unfilled, unfilled_debug
+    return assignments, unfilled
 
 def repair_to_meet_min_hours(
     year: int,
@@ -349,8 +254,8 @@ def generate_schedule_hard_min_hours(
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     soft_avoid: Optional[Dict[int, Set[str]]] = None,
-) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], List[Dict], Dict[int, int], int]:
-    assignments, unfilled, unfilled_debug = generate_schedule(
+) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], Dict[int, int], int]:
+    assignments, unfilled = generate_schedule(
         year, month, staff_ids, blocked_any,
         transition_rules=transition_rules,
         blocked_type=blocked_type,
@@ -361,101 +266,4 @@ def generate_schedule_hard_min_hours(
         transition_rules=transition_rules,
         blocked_type=blocked_type
     )
-    return assignments, unfilled, unfilled_debug, hours, swaps
-# -------------------- VALIDATION --------------------
-def validate_assignments(
-    year: int,
-    month: int,
-    assignments: List[Tuple[str, ShiftType, int]],
-    staff_ids: List[int],
-    blocked_any: Dict[int, Set[str]],
-    min_required_hours: int,
-    transition_rules: List[Dict] | None = None,
-    blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
-) -> Tuple[Dict, List[Dict], List[int]]:
-    transition_rules = transition_rules or []
-    blocked_type = blocked_type or {}
-
-    hours = _compute_hours(assignments, staff_ids)
-    deficits = [sid for sid in staff_ids if hours.get(sid, 0) < min_required_hours]
-
-    assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]] = _build_assigned_by_day(assignments)
-
-    def _match(rule_val: str, actual: str) -> bool:
-        return rule_val == "ANY" or rule_val == actual
-
-    def _match_day(rule_day: str, cur_day_iso: str) -> bool:
-        if rule_day == "ANY":
-            return True
-        return rule_day == _day_kind(cur_day_iso)
-
-    def _violates(prev: ShiftType | None, cur: ShiftType, cur_day_iso: str) -> bool:
-        if prev is None:
-            return False
-        for r in transition_rules:
-            apply_day = r.get("apply_day", "ANY")
-            if not _match_day(apply_day, cur_day_iso):
-                continue
-            if _match(r["prev_type"], prev) and _match(r["next_type"], cur):
-                return True
-        return False
-
-    violations: List[Dict] = []
-
-    # same-day multi shift + blocked check
-    seen = {}
-    for d, stype, sid in assignments:
-        key = (d, sid)
-        seen[key] = seen.get(key, 0) + 1
-        if d in blocked_any.get(sid, set()):
-            violations.append({
-                "type": "BLOCKED_DAY",
-                "date": d,
-                "shift_type": stype,
-                "staff_id": sid,
-                "detail": "Hard block gününe atama"
-            })
-
-    for (d, sid), cnt in seen.items():
-        if cnt > 1:
-            violations.append({
-                "type": "SAME_DAY_MULTI_SHIFT",
-                "date": d,
-                "shift_type": "",
-                "staff_id": sid,
-                "detail": f"Aynı günde {cnt} vardiya"
-            })
-
-    # transition violations
-    for d, stype, sid in assignments:
-        prev_day = _prev_day_iso(d)
-        prev_t = None
-
-        bt = blocked_type.get(sid, {}).get(prev_day)
-        if bt == "rapor":
-            prev_t = "RAPOR"
-        elif bt == "yillik_izin":
-            prev_t = "YILLIK_IZIN"
-        else:
-            prev_list = assigned_by_day.get(prev_day, [])
-            for psid, pst in prev_list:
-                if psid == sid:
-                    prev_t = pst
-                    break
-
-        if _violates(prev_t, stype, d):
-            violations.append({
-                "type": "TRANSITION_RULE",
-                "date": d,
-                "shift_type": stype,
-                "staff_id": sid,
-                "detail": f"Geçiş ihlali: {prev_t} -> {stype}"
-            })
-
-    summary = {
-        "hard_ok": (len(violations) == 0),
-        "min_hours_ok": (len(deficits) == 0),
-        "violations_count": len(violations),
-        "deficits_count": len(deficits),
-    }
-    return summary, violations, deficits
+    return assignments, unfilled, hours, swaps

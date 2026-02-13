@@ -20,7 +20,7 @@ from src.calendar_utils import (
     iter_month_days, count_weekdays_excluding_holidays
 )
 from src.blockers import build_blocked_days_with_type
-from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours, validate_assignments
+from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours
 from src.assignments_repo import clear_month, insert_assignments, list_month
 from src.rules_repo import ensure_rules_table, add_rule, list_rules, set_rule_active, delete_rule
 
@@ -368,6 +368,7 @@ with tab_plan:
 
         # ---- SOFT isteğe rağmen atananlar (şeffaflık) ----
         st.markdown("### ⚠️ SOFT isteğe rağmen atananlar")
+        # Mevcut plan varsa kontrol edelim
         plan_rows_now = list_month(int(year), int(month))
         if not plan_rows_now:
             st.info("Önce plan üretince burada SOFT çatışmalarını göstereceğim.")
@@ -392,94 +393,27 @@ with tab_plan:
         transition_rules = list_rules(active_only=True)
         st.write(f"Aktif geçiş kuralı sayısı: **{len(transition_rules)}**")
 
-        st.markdown("---")
-        st.markdown("### DOGRULAMA (VALID/INVALID)")
-
-        _val = st.session_state.get("last_validation")
-        if not _val:
-            st.info("Henüz doğrulama yok. Plan üretince burada otomatik kontrol göreceksin.")
-        else:
-            summary = _val.get("summary", {})
-            violations = _val.get("violations", [])
-            deficits = _val.get("deficits", [])
-            unfilled_n = _val.get("unfilled_count", None)
-
-            hard_ok = bool(summary.get("hard_ok", True))
-            min_ok  = bool(summary.get("min_hours_ok", True))
-            unfilled_ok = (unfilled_n == 0) if isinstance(unfilled_n, int) else None
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.success("Hard ihlal yok ✅" if hard_ok else "Hard ihlal var ❌")
-            with c2:
-                st.success("Min saat tuttu ✅" if min_ok else "Min saat tutmadi ❌")
-            with c3:
-                if unfilled_ok is None:
-                    st.info("Unfilled bilgisi yok")
-                else:
-                    st.success("Unfilled yok ✅" if unfilled_ok else "Unfilled var ❌")
-
-            if deficits:
-                st.warning("Min saat altinda kalan ID: " + ", ".join(str(x) for x in deficits))
-
-            if violations:
-                import pandas as pd
-                dfv = pd.DataFrame(violations)
-                st.dataframe(dfv, width="stretch", height=260)
-            else:
-                st.caption("Ihlal listesi: bos")
-
-
         if st.button("Plan Üret (Hard min)", type="primary", key="plan_btn"):
+            # blockers: rapor/izin + approved HARD istek + approved SOFT istek (soft_avoid)
             blocked_any, blocked_type, soft_avoid = build_blocked_days_with_type(int(year), int(month))
 
-            assignments, unfilled, unfilled_debug, hours, swaps = generate_schedule_hard_min_hours(
+            assignments, unfilled, hours, swaps = generate_schedule_hard_min_hours(
                 int(year), int(month), staff_ids, blocked_any, min_required_hours,
                 transition_rules=transition_rules,
                 blocked_type=blocked_type,
                 soft_avoid=soft_avoid
             )
 
-            # --- VALIDATION hesapla (kalıcı) ---
-            try:
-                v_summary, v_violations, v_deficits = validate_assignments(
-                    int(year), int(month),
-                    assignments,
-                    staff_ids,
-                    blocked_any,
-                    min_required_hours,
-                    transition_rules=transition_rules,
-                    blocked_type=blocked_type
-                )
-                st.session_state["last_validation"] = {
-                    "summary": v_summary,
-                    "violations": v_violations,
-                    "deficits": v_deficits,
-                    "unfilled_count": len(unfilled) if unfilled is not None else None,
-                }
-            except Exception as e:
-                st.session_state["last_validation"] = {
-                    "summary": {"hard_ok": False, "min_hours_ok": False},
-                    "violations": [{"type":"VALIDATION_ERROR","date":"","shift_type":"","staff_id":-1,"detail":str(e)}],
-                    "deficits": [],
-                    "unfilled_count": len(unfilled) if unfilled is not None else None,
-                }
-            # --- /VALIDATION ---
-
             clear_month(int(year), int(month))
+            # FIX: normalize assignments (tuple -> dict) before DB insert
             if assignments and isinstance(assignments[0], (tuple, list)):
                 assignments = [{"date": a[0], "shift_type": a[1], "staff_id": a[2]} for a in assignments]
             insert_assignments(assignments)
 
-            st.markdown("---")
+            if unfilled:
+                st.warning(f"Doldurulamayan slot: {len(unfilled)} (kural çakışması / personel yetersizliği olabilir)")
 
-            # ✅ Unfilled raporu: ekranda kaybolmasın diye session_state'e yaz
-            st.session_state["last_unfilled"] = unfilled
-            st.session_state["last_unfilled_debug"] = unfilled_debug if 'unfilled_debug' in locals() else []
-            st.session_state["last_unfilled_year"] = int(year)
-            st.session_state["last_unfilled_month"] = int(month)
             deficits = [sid for sid in staff_ids if hours.get(sid, 0) < min_required_hours]
-
             if deficits:
                 st.error(
                     f"Hard min hedefi tam sağlanamadı. Eksi kalan kişi sayısı: {len(deficits)}. "
@@ -491,144 +425,27 @@ with tab_plan:
             st.rerun()
 
         st.markdown("---")
-
-        # ================== 🚫 Dolmayan Slotlar (Neden Raporu) ==================
-        st.markdown("---")
-        st.markdown("### 🚫 Dolmayan Slotlar (Neden Raporu)")
-
-        last_y = st.session_state.get("last_unfilled_year")
-        last_m = st.session_state.get("last_unfilled_month")
-        last_unfilled = st.session_state.get("last_unfilled")
-        last_debug = st.session_state.get("last_unfilled_debug")
-
-        if last_unfilled is None or last_y != int(year) or last_m != int(month):
-            st.info("Plan ürettikten sonra burada dolmayan slotlar ve nedeni görünecek.")
-        else:
-            if not last_unfilled:
-                st.success("Bu ay dolmayan slot yok ✅")
-            else:
-                st.warning(f"Doldurulamayan slot: {len(last_unfilled)} (kural çakışması / personel yetersizliği olabilir)")
-
-                # Debug varsa özet tablo
-                if last_debug:
-                    df_unfilled = pd.DataFrame(last_debug)
-                    g = df_unfilled.groupby(["date", "shift_type"], as_index=False).agg({
-                        "need": "sum",
-                        "assigned": "sum",
-                        "missing": "sum",
-                        "reason": "first",
-                    }).sort_values(["date", "shift_type"])
-
-                    st.dataframe(g, width="stretch", height=320)
-                    st.download_button(
-                        "📄 Dolmayan slot raporu (CSV)",
-                        data=g.to_csv(index=False).encode("utf-8"),
-                        file_name=f"unfilled_{int(year)}_{int(month):02d}.csv",
-                        mime="text/csv",
-                        key="dl_unfilled_csv"
-                    )
-                else:
-                    df_unfilled = pd.DataFrame(last_unfilled)
-                    if "day" in df_unfilled.columns:
-                        df_unfilled.rename(columns={"day": "date"}, inplace=True)
-                    st.dataframe(df_unfilled, width="stretch", height=260)
-        # ================== /🚫 Dolmayan Slotlar ==================
-
-                st.markdown("### Plan çıktısı (gün gün)")
+        st.markdown("### Plan çıktısı (gün gün)")
 
         rows = list_month(int(year), int(month))
         if not rows:
             st.info("Bu ay için plan yok. 'Plan Üret' butonuna bas.")
         else:
-            # ===== 4+ GÜN BOŞLUK RAPORU =====
+
+            # === MATRIX_VIEW_START ===
             st.markdown("---")
-            st.markdown("### 💤 4+ Gün Boşluk Raporu")
-
-            off_runs = []
-            for sid in staff_ids:
-                run_start = None
-                run_len = 0
-                has_blocked = False
-
-                # (AUTO-FIX) day_isos tanımı (NameError fix)
-                day_infos = iter_month_days(int(year), int(month))
-                day_isos = [d.iso for d in day_infos]
-
-                for d_iso in day_isos:
-                    # (AUTO-FIX) cell map: 4+ gün boşluk raporu için hızlı lookup
-                    try:
-                        cell = {(int(r.get('staff_id')), r.get('date')): (r.get('shift_type') or '') for r in rows if r.get('date')}
-                    except Exception:
-                        cell = {}
-
-                    worked_flag = (sid, d_iso) in cell
-                    # (AUTO-FIX) blocked_type: 4+ gün boşluk raporu bloğu için
-                    if 'blocked_type' not in locals():
-                        blocked_type = {}
-
-                    bt = blocked_type.get(sid, {}).get(d_iso)
-                    is_off = (not worked_flag)
-
-                    if is_off:
-                        if run_start is None:
-                            run_start = d_iso
-                            run_len = 1
-                            has_blocked = bool(bt)
-                        else:
-                            run_len += 1
-                            if bt:
-                                has_blocked = True
-                    else:
-                        if run_start is not None and run_len >= 4:
-                            off_runs.append({
-                                "Personel": staff_name_by_id.get(sid, f"ID:{sid}"),
-                                "ID": sid,
-                                "Baslangic": run_start,
-                                "Bitis": (date.fromisoformat(d_iso) - timedelta(days=1)).isoformat(),
-                                "Gun": run_len,
-                                "AraliktaRaporIzinVar": "Evet" if has_blocked else "Hayır",
-                            })
-                        run_start = None
-                        run_len = 0
-                        has_blocked = False
-
-                if run_start is not None and run_len >= 4:
-                    off_runs.append({
-                        "Personel": staff_name_by_id.get(sid, f"ID:{sid}"),
-                        "ID": sid,
-                        "Baslangic": run_start,
-                        "Bitis": day_isos[-1],
-                        "Gun": run_len,
-                        "AraliktaRaporIzinVar": "Evet" if has_blocked else "Hayır",
-                    })
-
-            if not off_runs:
-                st.success("4+ gün boşluk yok ✅")
-            else:
-                df_off = pd.DataFrame(off_runs).sort_values(["Gun", "Personel"], ascending=[False, True])
-                st.warning(f"4+ gün boşluk bulunan kayıt sayısı: {len(df_off)}")
-                st.dataframe(df_off, width="stretch", height=260)
-                st.download_button(
-                    "📄 4+ gün boşluk raporu (CSV)",
-                    data=df_off.to_csv(index=False).encode("utf-8"),
-                    file_name=f"bosluk_4plus_{int(year)}_{int(month):02d}.csv",
-                    mime="text/csv",
-                    key="dl_gap_csv"
-                )
-            # ===== /4+ GÜN BOŞLUK RAPORU =====
-
-            st.markdown("---")
-            
-            
             st.markdown("### 📊 Aylık Çizelge (Sadece Yazı Rengi)")
 
+            # blocked_type (rapor / yıllık izin) unavailability tablosundan üret (ROBUST)
             blocked_type = {}
             unav_count = 0
             yyyymm = f"{int(year)}-{int(month):02d}-"
 
+            # name->id dönüşümü (lokal)
             name_to_id_local = {v: k for k, v in staff_name_by_id.items()}
 
             def _as_dict(x):
+                # sqlite Row gibi ise dict() çalışır; değilse zaten dict olabilir
                 try:
                     return dict(x)
                 except Exception:
@@ -639,10 +456,13 @@ with tab_plan:
 
                 for ur0 in unav_rows:
                     ur = _as_dict(ur0)
+
+                    # date bazen "date" bazen "day" olabilir
                     d = ur.get("date") or ur.get("day")
                     if not d:
                         continue
                     d = str(d)
+                    # bazı DB'lerde "2026-02-01 00:00:00" gibi gelebilir
                     d = d.split(" ")[0].split("T")[0]
 
                     if not d.startswith(yyyymm):
@@ -663,22 +483,27 @@ with tab_plan:
                     unav_count += 1
 
             except Exception as e:
-                st.warning(f"Rapor/izin okunamadı: {e}")
+                st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
                 blocked_type = {}
                 unav_count = 0
+                st.warning(f"Rapor/izin okunamadı: {e}")
 
             st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
             
             name_to_id = {v: k for k, v in staff_name_by_id.items()}
 
+            # Ay günleri: 01..(ayın son günü)
             day_infos = iter_month_days(int(year), int(month))
             day_isos = [d.iso for d in day_infos]
-            day_cols = [str(int(d.iso.split("-")[2])).zfill(2) for d in day_infos]
+            day_cols = [str(int(d.iso.split("-")[2])).zfill(2) for d in day_infos]  # 01..31
+            col_to_iso = {c: iso for c, iso in zip(day_cols, day_isos)}
 
+            # Personel listesi
             staff_df = pd.DataFrame(
                 [{"Personel": staff_name_by_id.get(sid, f"ID:{sid}"), "ID": sid} for sid in staff_ids]
             ).sort_values(["Personel", "ID"]).reset_index(drop=True)
 
+            # Hücre: (staff_id, date)->shift_type
             cell = {}
             for r in rows:
                 sid = r.get("staff_id")
@@ -699,6 +524,7 @@ with tab_plan:
                 else:
                     cell.setdefault(key, stype)
 
+            # Matris tablo (DAY=8, NIGHT=16, D24=24, RAPOR=R, İZİN=İ)
             matrix_rows = []
             for _, rr in staff_df.iterrows():
                 sid = int(rr["ID"])
@@ -726,6 +552,7 @@ with tab_plan:
 
             df_matrix = pd.DataFrame(matrix_rows)
 
+            # Açıklama: rapor/izin gün sayısı (EN SON sütun)
             aciklama = []
             for sid in df_matrix["ID"].tolist():
                 sid = int(sid)
@@ -740,8 +567,11 @@ with tab_plan:
                 aciklama.append(" | ".join(parts) if parts else "")
             df_matrix["Açıklama"] = aciklama
 
+            # ===== MESAI OZETI SUTUNLARI =====
+            # Min saat: (tatiller hariç) hafta içi gün sayısı × 8
             min_required_hours = weekday_count * 8
 
+            # Çalışılan saat: DB'deki rows (shift_type) üzerinden hesapla
             HOURS_MAP = {"DAY": 8, "NIGHT": 16, "D24": 24}
 
             worked = {sid: 0 for sid in staff_ids}
@@ -754,6 +584,7 @@ with tab_plan:
                 sid = int(sid)
 
                 stype = (rr.get("shift_type") or "")
+                # bazen "DAY+NIGHT" gibi birleşik olabilir
                 parts = str(stype).split("+")
                 for part in parts:
                     part = part.strip()
@@ -767,14 +598,17 @@ with tab_plan:
             df_matrix["MinSaat"] = min_required_hours
             df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
             df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
+            # ===== /MESAI OZETI =====
 
+            # Kolon sırası: Açıklama en sonda
             ordered_cols = ["Personel", "ID"] + day_cols + ["MinSaat", "CalistigiSaat", "Fark", "Açıklama"]
             df_matrix = df_matrix[ordered_cols]
 
-            COLOR_DAY   = "#2F75B5"
-            COLOR_NIGHT = "#C9A100"
-            COLOR_D24   = "#2E8B57"
-            COLOR_BLOCK = "#C00000"
+            # Sadece YAZI rengi (arka plan değiştirme YOK)
+            COLOR_DAY   = "#2F75B5"  # mavi
+            COLOR_NIGHT = "#C9A100"  # sarı (daha okunur)
+            COLOR_D24   = "#2E8B57"  # yeşil
+            COLOR_BLOCK = "#C00000"  # kırmızı
 
             def style_text_only(data: pd.DataFrame):
                 styles = pd.DataFrame("", index=data.index, columns=data.columns)
@@ -803,23 +637,26 @@ with tab_plan:
                 key="dl_matrix_csv"
             )
 
+            # === EXCEL_EXPORT_START ===
             xlsx_buf = io.BytesIO()
             try:
                 from openpyxl.styles import Font
                 from openpyxl.utils import get_column_letter
 
-                FONT_DAY   = Font(color="2F75B5")
-                FONT_NIGHT = Font(color="C9A100")
-                FONT_D24   = Font(color="2E8B57")
-                FONT_BLOCK = Font(color="C00000")
+                # Excel: sadece YAZI rengi (arka plan yok)
+                FONT_DAY   = Font(color="2F75B5")  # mavi
+                FONT_NIGHT = Font(color="C9A100")  # sarı
+                FONT_D24   = Font(color="2E8B57")  # yeşil
+                FONT_BLOCK = Font(color="C00000")  # kırmızı
 
                 with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
                     df_matrix.to_excel(writer, index=False, sheet_name="Cizelge")
                     ws = writer.sheets["Cizelge"]
 
                     headers = [cell.value for cell in ws[1]]
+                    # gün sütunları: "01","02",...
                     day_headers = [h for h in headers if isinstance(h, str) and len(h) == 2 and h.isdigit()]
-                    day_cols_idx = [headers.index(h) + 1 for h in day_headers]
+                    day_cols_idx = [headers.index(h) + 1 for h in day_headers]  # 1-based
 
                     for r in range(2, ws.max_row + 1):
                         for c in day_cols_idx:
@@ -850,5 +687,11 @@ with tab_plan:
             except Exception as e:
                 st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
 
+            # === EXCEL_EXPORT_END ===
+
+# === MATRIX_VIEW_END ===
+
             st.markdown("---")
             st.caption("Not: Aşağıdaki eski uzun listeyi artık göstermiyoruz; çizelge yukarıda.")
+                
+        # (KALDIRILDI) Eski mesai özeti bloğu silindi.

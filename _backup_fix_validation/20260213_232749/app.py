@@ -20,7 +20,7 @@ from src.calendar_utils import (
     iter_month_days, count_weekdays_excluding_holidays
 )
 from src.blockers import build_blocked_days_with_type
-from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours, validate_assignments
+from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_hard_min_hours
 from src.assignments_repo import clear_month, insert_assignments, list_month
 from src.rules_repo import ensure_rules_table, add_rule, list_rules, set_rule_active, delete_rule
 
@@ -392,44 +392,6 @@ with tab_plan:
         transition_rules = list_rules(active_only=True)
         st.write(f"Aktif geçiş kuralı sayısı: **{len(transition_rules)}**")
 
-        st.markdown("---")
-        st.markdown("### DOGRULAMA (VALID/INVALID)")
-
-        _val = st.session_state.get("last_validation")
-        if not _val:
-            st.info("Henüz doğrulama yok. Plan üretince burada otomatik kontrol göreceksin.")
-        else:
-            summary = _val.get("summary", {})
-            violations = _val.get("violations", [])
-            deficits = _val.get("deficits", [])
-            unfilled_n = _val.get("unfilled_count", None)
-
-            hard_ok = bool(summary.get("hard_ok", True))
-            min_ok  = bool(summary.get("min_hours_ok", True))
-            unfilled_ok = (unfilled_n == 0) if isinstance(unfilled_n, int) else None
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.success("Hard ihlal yok ✅" if hard_ok else "Hard ihlal var ❌")
-            with c2:
-                st.success("Min saat tuttu ✅" if min_ok else "Min saat tutmadi ❌")
-            with c3:
-                if unfilled_ok is None:
-                    st.info("Unfilled bilgisi yok")
-                else:
-                    st.success("Unfilled yok ✅" if unfilled_ok else "Unfilled var ❌")
-
-            if deficits:
-                st.warning("Min saat altinda kalan ID: " + ", ".join(str(x) for x in deficits))
-
-            if violations:
-                import pandas as pd
-                dfv = pd.DataFrame(violations)
-                st.dataframe(dfv, width="stretch", height=260)
-            else:
-                st.caption("Ihlal listesi: bos")
-
-
         if st.button("Plan Üret (Hard min)", type="primary", key="plan_btn"):
             blocked_any, blocked_type, soft_avoid = build_blocked_days_with_type(int(year), int(month))
 
@@ -439,32 +401,6 @@ with tab_plan:
                 blocked_type=blocked_type,
                 soft_avoid=soft_avoid
             )
-
-            # --- VALIDATION hesapla (kalıcı) ---
-            try:
-                v_summary, v_violations, v_deficits = validate_assignments(
-                    int(year), int(month),
-                    assignments,
-                    staff_ids,
-                    blocked_any,
-                    min_required_hours,
-                    transition_rules=transition_rules,
-                    blocked_type=blocked_type
-                )
-                st.session_state["last_validation"] = {
-                    "summary": v_summary,
-                    "violations": v_violations,
-                    "deficits": v_deficits,
-                    "unfilled_count": len(unfilled) if unfilled is not None else None,
-                }
-            except Exception as e:
-                st.session_state["last_validation"] = {
-                    "summary": {"hard_ok": False, "min_hours_ok": False},
-                    "violations": [{"type":"VALIDATION_ERROR","date":"","shift_type":"","staff_id":-1,"detail":str(e)}],
-                    "deficits": [],
-                    "unfilled_count": len(unfilled) if unfilled is not None else None,
-                }
-            # --- /VALIDATION ---
 
             clear_month(int(year), int(month))
             if assignments and isinstance(assignments[0], (tuple, list)):
@@ -540,86 +476,7 @@ with tab_plan:
         if not rows:
             st.info("Bu ay için plan yok. 'Plan Üret' butonuna bas.")
         else:
-            # ===== 4+ GÜN BOŞLUK RAPORU =====
             st.markdown("---")
-            st.markdown("### 💤 4+ Gün Boşluk Raporu")
-
-            off_runs = []
-            for sid in staff_ids:
-                run_start = None
-                run_len = 0
-                has_blocked = False
-
-                # (AUTO-FIX) day_isos tanımı (NameError fix)
-                day_infos = iter_month_days(int(year), int(month))
-                day_isos = [d.iso for d in day_infos]
-
-                for d_iso in day_isos:
-                    # (AUTO-FIX) cell map: 4+ gün boşluk raporu için hızlı lookup
-                    try:
-                        cell = {(int(r.get('staff_id')), r.get('date')): (r.get('shift_type') or '') for r in rows if r.get('date')}
-                    except Exception:
-                        cell = {}
-
-                    worked_flag = (sid, d_iso) in cell
-                    # (AUTO-FIX) blocked_type: 4+ gün boşluk raporu bloğu için
-                    if 'blocked_type' not in locals():
-                        blocked_type = {}
-
-                    bt = blocked_type.get(sid, {}).get(d_iso)
-                    is_off = (not worked_flag)
-
-                    if is_off:
-                        if run_start is None:
-                            run_start = d_iso
-                            run_len = 1
-                            has_blocked = bool(bt)
-                        else:
-                            run_len += 1
-                            if bt:
-                                has_blocked = True
-                    else:
-                        if run_start is not None and run_len >= 4:
-                            off_runs.append({
-                                "Personel": staff_name_by_id.get(sid, f"ID:{sid}"),
-                                "ID": sid,
-                                "Baslangic": run_start,
-                                "Bitis": (date.fromisoformat(d_iso) - timedelta(days=1)).isoformat(),
-                                "Gun": run_len,
-                                "AraliktaRaporIzinVar": "Evet" if has_blocked else "Hayır",
-                            })
-                        run_start = None
-                        run_len = 0
-                        has_blocked = False
-
-                if run_start is not None and run_len >= 4:
-                    off_runs.append({
-                        "Personel": staff_name_by_id.get(sid, f"ID:{sid}"),
-                        "ID": sid,
-                        "Baslangic": run_start,
-                        "Bitis": day_isos[-1],
-                        "Gun": run_len,
-                        "AraliktaRaporIzinVar": "Evet" if has_blocked else "Hayır",
-                    })
-
-            if not off_runs:
-                st.success("4+ gün boşluk yok ✅")
-            else:
-                df_off = pd.DataFrame(off_runs).sort_values(["Gun", "Personel"], ascending=[False, True])
-                st.warning(f"4+ gün boşluk bulunan kayıt sayısı: {len(df_off)}")
-                st.dataframe(df_off, width="stretch", height=260)
-                st.download_button(
-                    "📄 4+ gün boşluk raporu (CSV)",
-                    data=df_off.to_csv(index=False).encode("utf-8"),
-                    file_name=f"bosluk_4plus_{int(year)}_{int(month):02d}.csv",
-                    mime="text/csv",
-                    key="dl_gap_csv"
-                )
-            # ===== /4+ GÜN BOŞLUK RAPORU =====
-
-            st.markdown("---")
-            
-            
             st.markdown("### 📊 Aylık Çizelge (Sadece Yazı Rengi)")
 
             blocked_type = {}
@@ -663,9 +520,9 @@ with tab_plan:
                     unav_count += 1
 
             except Exception as e:
-                st.warning(f"Rapor/izin okunamadı: {e}")
                 blocked_type = {}
                 unav_count = 0
+                st.warning(f"Rapor/izin okunamadı: {e}")
 
             st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
             
