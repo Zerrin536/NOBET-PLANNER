@@ -264,7 +264,7 @@ def repair_to_meet_min_hours(
     assignments: List[Tuple[str, ShiftType, int]],
     staff_ids: List[int],
     blocked_any: Dict[int, Set[str]],
-    min_required_hours: int,
+    min_required_hours: int | Dict[int, int],
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     max_iters: int = 20000,
@@ -273,11 +273,16 @@ def repair_to_meet_min_hours(
     assigned_by_day = _build_assigned_by_day(assignments)
     hours = _compute_hours(assignments, staff_ids)
 
+    def _target_min(sid: int) -> int:
+        if isinstance(min_required_hours, dict):
+            return int(min_required_hours.get(sid, 0))
+        return int(min_required_hours)
+
     def deficits():
-        return [sid for sid in staff_ids if hours[sid] < min_required_hours]
+        return [sid for sid in staff_ids if hours[sid] < _target_min(sid)]
 
     def surpluses():
-        return [sid for sid in staff_ids if hours[sid] > min_required_hours]
+        return [sid for sid in staff_ids if hours[sid] > _target_min(sid)]
 
     swaps = 0
     it = 0
@@ -311,7 +316,7 @@ def repair_to_meet_min_hours(
                 continue
 
             h = SHIFT_HOURS.get(stype, 0)
-            if hours[s_staff] - h < min_required_hours:
+            if hours[s_staff] - h < _target_min(s_staff):
                 continue
 
             day_list = assigned_by_day.get(d, [])
@@ -345,7 +350,7 @@ def generate_schedule_hard_min_hours(
     month: int,
     staff_ids: List[int],
     blocked_any: Dict[int, Set[str]],
-    min_required_hours: int,
+    min_required_hours: int | Dict[int, int],
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     soft_avoid: Optional[Dict[int, Set[str]]] = None,

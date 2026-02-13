@@ -433,8 +433,25 @@ with tab_plan:
         if st.button("Plan Üret (Hard min)", type="primary", key="plan_btn"):
             blocked_any, blocked_type, soft_avoid = build_blocked_days_with_type(int(year), int(month))
 
+            # kişi-bazlı min saat: rapor/izin (hafta içi) kadar 8 saat düş
+            from datetime import date as _date
+            holiday_set_local = set(list_holidays())
+            off_weekday = {}
+            for sid in staff_ids:
+                cnt = 0
+                for d_iso, t in (blocked_type.get(sid, {}) or {}).items():
+                    try:
+                        dt = _date.fromisoformat(str(d_iso)[:10])
+                        if dt.weekday() < 5 and str(d_iso)[:10] not in holiday_set_local:
+                            # rapor veya yıllık izin olan hafta içi gün -> min saatten düş
+                            if t in ('rapor','yillik_izin'):
+                                cnt += 1
+                    except Exception:
+                        pass
+                off_weekday[sid] = cnt
+            min_by_staff = {sid: max(0, int(min_required_hours) - off_weekday.get(sid,0)*8) for sid in staff_ids}
             assignments, unfilled, unfilled_debug, hours, swaps = generate_schedule_hard_min_hours(
-                int(year), int(month), staff_ids, blocked_any, min_required_hours,
+                int(year), int(month), staff_ids, blocked_any, min_by_staff,
                 transition_rules=transition_rules,
                 blocked_type=blocked_type,
                 soft_avoid=soft_avoid
@@ -478,7 +495,7 @@ with tab_plan:
             st.session_state["last_unfilled_debug"] = unfilled_debug if 'unfilled_debug' in locals() else []
             st.session_state["last_unfilled_year"] = int(year)
             st.session_state["last_unfilled_month"] = int(month)
-            deficits = [sid for sid in staff_ids if hours.get(sid, 0) < min_required_hours]
+            deficits = [sid for sid in staff_ids if hours.get(sid, 0) < int(min_by_staff.get(sid, min_required_hours))]
 
             if deficits:
                 st.error(
@@ -764,7 +781,22 @@ with tab_plan:
                     elif part.startswith("D24"):
                         worked[sid] += HOURS_MAP["D24"]
 
-            df_matrix["MinSaat"] = min_required_hours
+            # kişi-bazlı MinSaat (çizelge): rapor/izin hafta içi gün * 8 düş
+            from datetime import date as _date
+            holiday_set_local = set(list_holidays())
+            min_by_staff_matrix = {}
+            for _sid in staff_ids:
+                _cnt = 0
+                for _d_iso, _t in (blocked_type.get(int(_sid), {}) or {}).items():
+                    try:
+                        _dd = _date.fromisoformat(str(_d_iso)[:10])
+                        if _dd.weekday() < 5 and str(_d_iso)[:10] not in holiday_set_local:
+                            if _t in ('rapor','yillik_izin'):
+                                _cnt += 1
+                    except Exception:
+                        pass
+                min_by_staff_matrix[int(_sid)] = max(0, int(min_required_hours) - _cnt*8)
+            df_matrix["MinSaat"] = df_matrix["ID"].map(lambda x: int(min_by_staff_matrix.get(int(x), min_required_hours)))
             df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
             df_matrix["Fark"] = df_matrix["CalistigiSaat"] - df_matrix["MinSaat"]
 
