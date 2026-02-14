@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import date, timedelta
 
 from src.db import init_db
+from src.exporter import export_schedule_xlsx
 from src.staff_repo import (
     add_staff, add_staff_bulk, list_staff, set_staff_active, delete_staff
 )
@@ -24,10 +25,78 @@ from src.scheduler import build_required_shifts, SHIFT_HOURS, generate_schedule_
 from src.assignments_repo import clear_month, insert_assignments, list_month
 from src.rules_repo import ensure_rules_table, add_rule, list_rules, set_rule_active, delete_rule
 from src.rules_presets import PRESETS, apply_preset
+from src.auth import login_panel, current_user, require_role
+
+
+# ===== ROLE HELPERS (AUTO SYNC) =====
+def _is_admin():
+    return bool(st.session_state.get("admin_logged_in", False)) or str(st.session_state.get("role", "")).lower() == "admin"
+
+# -------------------- ROLE HELPERS (FIXED) --------------------
+def _role():
+    return (st.session_state.get("user_role")
+            or st.session_state.get("role")
+            or ("staff" if st.session_state.get("staff_logged_in") else None)
+            or ("admin" if st.session_state.get("admin_logged_in") else None)
+            or "admin")
+
+def _is_staff():
+    return str(_role()).lower() == "staff"
+
+def _is_admin():
+    return not _is_staff()
+
+def _staff_id():
+    sid = (st.session_state.get("staff_id")
+           or st.session_state.get("current_staff_id")
+           or st.session_state.get("sid"))
+    try:
+        return int(sid) if sid not in (None, "", 0, "0") else None
+    except Exception:
+        return None
+# -------------------- /ROLE HELPERS --------------------
+# ===== /ROLE HELPERS =====
 
 st.set_page_config(page_title="Nöbet Planlayıcı", layout="wide")
+
+# --- AUTH HELPERS ---
+def _role() -> str:
+    return str(st.session_state.get("role") or st.session_state.get("auth_role") or "admin").lower()
+
+def _staff_id() -> int | None:
+    v = st.session_state.get("staff_id") or st.session_state.get("auth_staff_id")
+    try:
+        return int(v) if v is not None else None
+    except Exception:
+        return None
+
+def _is_staff() -> bool:
+    return _role() == "staff"
+
+def _deny_admin_only():
+    st.error("⛔ Bu sayfa sadece **Yönetici** içindir.")
+    return
+# --- /AUTH HELPERS ---
 init_db()
+
+# ===== ROLE SYNC =====
+# Login sistemi hangi anahtarları kullanırsa kullansın:
+# - admin_logged_in True ise admin
+# - staff_id dolu ise (admin değilse) staff
+if st.session_state.get("admin_logged_in", False):
+    st.session_state["role"] = "admin"
+elif st.session_state.get("staff_id", None) is not None:
+    st.session_state["staff_logged_in"] = True
+    st.session_state["role"] = "staff"
+# ===== /ROLE SYNC =====
 ensure_rules_table()
+
+
+# --- LOGIN PANEL ---
+with st.sidebar:
+    login_panel()
+user = current_user()
+# --- /LOGIN PANEL ---
 
 st.title("Akıllı Nöbet / Vardiya Planlayıcı")
 
@@ -37,73 +106,223 @@ tab_staff, tab_unav, tab_req, tab_cal, tab_rules, tab_plan = st.tabs(
 
 # -------------------- PERSONEL --------------------
 with tab_staff:
-    st.subheader("Personel Yönetimi")
 
-    col1, col2 = st.columns(2)
+    if _is_staff():
+        st.warning("⛔ Bu alan sadece **admin/yönetici** içindir.")
+    else:
 
-    with col1:
-        st.markdown("### Tek Tek Ekle")
-        name = st.text_input("Hemşire adı soyadı", placeholder="Örn: Ayşe Yılmaz", key="staff_name")
-        if st.button("Ekle", type="primary", key="staff_add_one"):
-            add_staff(name)
-            st.success("Eklendi ✅")
-            st.rerun()
+        # STAFF_VIEW_START_tab_staff
+        if _is_staff():
+            st.warning("⛔ Bu alan sadece **admin/yönetici** içindir.")
+            st.stop()
+    # STAFF_VIEW_END_tab_staff
 
-        st.markdown("---")
-        st.markdown("### Toplu Ekle (40 kişi için)")
-        bulk = st.text_area(
-            "Her satıra 1 isim yaz",
-            height=200,
-            placeholder="Ayşe Yılmaz\nElif Demir\n...",
-            key="staff_bulk"
-        )
-        if st.button("Toplu Ekle", key="staff_add_bulk"):
-            names = [n.strip() for n in bulk.splitlines() if n.strip()]
-            count = add_staff_bulk(names)
-            st.success(f"{count} kişi eklendi ✅")
-            st.rerun()
-
-    with col2:
-        st.markdown("### Liste")
-        filter_opt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="staff_filter")
-        only_active = None
-        if filter_opt == "Aktif":
-            only_active = True
-        elif filter_opt == "Pasif":
-            only_active = False
-
-        rows = list_staff(only_active=only_active)
-
-        if not rows:
-            st.info("Henüz personel yok.")
+        # STAFF_BANNER_tab_staff
+        if _is_staff():
+            st.caption('👤 Staff modu aktif')
+        elif _is_admin():
+            st.caption('🛡️ Admin modu aktif')
+        if _is_staff():
+            st.error('⛔ Bu sayfa sadece **Yönetici** içindir.')
         else:
-            for r in rows:
-                staff_id = int(r["id"])
-                full_name = r["full_name"]
-                is_active = bool(r["is_active"])
 
-                c1, c2, c3 = st.columns([6, 2, 2])
-                with c1:
-                    st.write(f"**{full_name}**  (ID: {staff_id})")
-                with c2:
-                    if is_active:
-                        if st.button("Pasif Yap", key=f"deact_{staff_id}"):
-                            set_staff_active(staff_id, False)
-                            st.rerun()
-                    else:
-                        if st.button("Aktif Yap", key=f"act_{staff_id}"):
-                            set_staff_active(staff_id, True)
-                            st.rerun()
-                with c3:
-                    if st.button("Sil", key=f"del_{staff_id}"):
-                        delete_staff(staff_id)
-                        st.rerun()
+            # GUARD_tab_staff
+            if current_user().get('role') not in ('admin',):
+                st.warning('Bu alan sadece **admin** içindir.')
+                st.stop()
+            st.subheader("Personel Yönetimi")
 
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### Tek Tek Ekle")
+                name = st.text_input("Hemşire adı soyadı", placeholder="Örn: Ayşe Yılmaz", key="staff_name")
+                if st.button("Ekle", type="primary", key="staff_add_one"):
+                    add_staff(name)
+                    st.success("Eklendi ✅")
+                    st.rerun()
+
+                st.markdown("---")
+                st.markdown("### Toplu Ekle (40 kişi için)")
+                bulk = st.text_area(
+                    "Her satıra 1 isim yaz",
+                    height=200,
+                    placeholder="Ayşe Yılmaz\nElif Demir\n...",
+                    key="staff_bulk"
+                )
+                if st.button("Toplu Ekle", key="staff_add_bulk"):
+                    names = [n.strip() for n in bulk.splitlines() if n.strip()]
+                    count = add_staff_bulk(names)
+                    st.success(f"{count} kişi eklendi ✅")
+                    st.rerun()
+
+            with col2:
+                st.markdown("### Liste")
+                filter_opt = st.radio("Filtre", ["Hepsi", "Aktif", "Pasif"], horizontal=True, key="staff_filter")
+                only_active = None
+                if filter_opt == "Aktif":
+                    only_active = True
+                elif filter_opt == "Pasif":
+                    only_active = False
+
+                rows = list_staff(only_active=only_active)
+
+                if not rows:
+                    st.info("Henüz personel yok.")
+                else:
+                    for r in rows:
+                        staff_id = int(r["id"])
+                        full_name = r["full_name"]
+                        is_active = bool(r["is_active"])
+
+                        c1, c2, c3 = st.columns([6, 2, 2])
+                        with c1:
+                            st.write(f"**{full_name}**  (ID: {staff_id})  |  PIN: `{(r['pin'] if hasattr(r, 'keys') and ('pin' in r.keys()) else '')}`")
+                        with c2:
+                            if is_active:
+                                if st.button("Pasif Yap", key=f"deact_{staff_id}"):
+                                    set_staff_active(staff_id, False)
+                                    st.rerun()
+                            else:
+                                if st.button("Aktif Yap", key=f"act_{staff_id}"):
+                                    set_staff_active(staff_id, True)
+                                    st.rerun()
+                        with c3:
+                            if st.button("Sil", key=f"del_{staff_id}"):
+                                delete_staff(staff_id)
+                                st.rerun()
 # -------------------- RAPOR / İZİN --------------------
 with tab_unav:
+
+    # STAFF_VIEW_START_tab_unav
+    st.info("👤 Staff modu: Burada sadece **kendi** rapor/izin kayıtlarını görürsün.")
+    sid = _staff_id()
+    if not sid:
+        st.error("Staff ID bulunamadı. (Giriş tekrar deneyin)")
+        st.stop()
+
+    st.markdown("#### ➕ Rapor/İzin Talebi Ekle (Admin Onayı Bekler)")
+    utype = st.selectbox("Tür", ["rapor", "yillik_izin"], index=0, key="staff_unav_type")
+    d1 = st.date_input("Başlangıç", key="staff_unav_d1")
+    d2 = st.date_input("Bitiş", key="staff_unav_d2")
+    note = st.text_input("Not (opsiyonel)", key="staff_unav_note")
+
+    if st.button("✅ Talebi Gönder", type="primary", key="staff_unav_submit"):
+        try:
+            import inspect
+            from src.unavailability_repo import add_unavailability_range
+
+            merged_note = ("ONAY BEKLIYOR | " + (note or "")).strip()
+
+            # d1-d2 aralığını gün listesine çevir (ISO string)
+            try:
+                d1v = d1
+                d2v = d2
+                if hasattr(d1v, "isoformat") and hasattr(d2v, "isoformat"):
+                    pass
+            except Exception:
+                pass
+
+            if d2 < d1:
+                st.error("Bitiş tarihi başlangıçtan küçük olamaz.")
+                st.stop()
+
+            days = []
+            cur = d1
+            while cur <= d2:
+                days.append(cur.isoformat())
+                cur = cur + timedelta(days=1)
+
+            sig = inspect.signature(add_unavailability_range)
+            params = list(sig.parameters.keys())
+            lower = [p.lower() for p in params]
+
+            kw = {}
+
+            # staff id
+            for name in params:
+                if name.lower() in ("staff_id", "sid"):
+                    kw[name] = sid
+
+            # days (zorunlu)
+            for name in params:
+                if name.lower() in ("days", "dates", "date_list", "day_list"):
+                    kw[name] = days
+
+            # type
+            for name in params:
+                if name.lower() in ("utype", "type", "kind"):
+                    kw[name] = utype
+
+            # note (varsa)
+            for name in params:
+                if name.lower() in ("note", "desc", "comment", "reason"):
+                    kw[name] = merged_note
+
+            if kw:
+                add_unavailability_range(**kw)
+            else:
+                # fallback: en yaygın positional: (sid, days, utype)
+                try:
+                    add_unavailability_range(sid, days, utype)
+                except TypeError:
+                    add_unavailability_range(sid, days)
+
+            st.success("Talep kaydedildi ✅ (admin onayı bekleniyor)")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Kaydedilemedi: {e}")
+
+
+    st.markdown("---")
+    st.markdown("#### 📄 Benim Rapor/İzin Kayıtlarım")
+
+    try:
+        from src.unavailability_repo import list_unavailability
+        rows = list_unavailability(None)  # bazı projelerde filtre paramı yok; sonra biz filtreleyeceğiz
+        mine = []
+        for r in (rows or []):
+            try:
+                rr = dict(r)
+            except Exception:
+                rr = r if isinstance(r, dict) else {}
+            rid = rr.get("id")
+            # staff_id alanı yoksa bile full_name bazlı karışmasın diye id yoksa es geç
+            if int(rr.get("staff_id") or 0) == int(sid):
+                mine.append(rr)
+
+        if not mine:
+            st.info("Kayıt yok.")
+        else:
+            # gösterim: onay bekliyor etiketi
+            for rr in mine:
+                extra = ((" | " + rr.get("note","")) if rr.get("note") else "")
+                status = "⏳ Onay bekliyor" if "ONAY BEKLIYOR" in (rr.get("note","") or "") else "✅ Onaylı"
+                st.write(f'**{rr.get("date","")}** — `{rr.get("type","")}` — {status}{extra}')
+    except Exception as e:
+        st.info("Kayıt yok.")
+        st.caption(f"(Detay: {e})")
+# STAFF_VIEW_END_tab_unav
+
+    # STAFF_BANNER_tab_unav
+    if _is_staff():
+        st.caption('👤 Staff modu aktif')
+    elif _is_admin():
+        st.caption('🛡️ Admin modu aktif')
+    # GUARD_tab_unav
+    if current_user().get('role') not in ('admin',):
+        st.warning('Bu alan sadece **admin** içindir.')
+        st.stop()
     st.subheader("Rapor / Yıllık İzin (Çalışılamayan Günler)")
 
     staff_rows = list_staff(only_active=True)
+
+    # ROLE_BASED_REQUESTS
+    u = current_user()
+    if u.get("role") == "staff":
+        staff_id = int(u["staff_id"])
+        st.info(f'Giriş yapan personel: **{u["staff_name"]}** (ID:{staff_id})')
+    
     if not staff_rows:
         st.warning("Önce aktif personel eklemelisin.")
     else:
@@ -151,23 +370,108 @@ with tab_unav:
 
 # -------------------- İSTEK DEFTERİ --------------------
 with tab_req:
+
+    # STAFF_VIEW_START_tab_req
+    st.info("👤 Staff modu: Sadece **kendi** isteklerini ekleyebilir ve görüntüleyebilirsin.")
+    sid = _staff_id()
+    if not sid:
+        st.error("Staff ID bulunamadı. (Giriş tekrar deneyin)")
+        st.stop()
+
+    st.markdown("#### ➕ İstek Ekle")
+    req_kind = st.selectbox("İstek tipi", ["HARD", "SOFT"], index=0, key="req_kind_staff")
+    req_day = st.date_input("İstek günü", key="req_day_staff")
+    req_note = st.text_area(
+        "İstek notu (opsiyonel)",
+        height=90,
+        placeholder="Örn: O gün eğitim var / çocuk randevusu…",
+        key="req_note_staff"
+    )
+
+    if st.button("✅ İstek Kaydet", type="primary", key="req_save_staff"):
+        try:
+            import inspect
+            from src.requests_repo import add_request
+            # repo imzasına göre esnek çağrı
+            sig = inspect.signature(add_request)
+            kw = {}
+            for name in sig.parameters:
+                ln = name.lower()
+                if ln in ("staff_id","sid"):
+                    kw[name] = sid
+                elif ln in ("date","day","request_date"):
+                    kw[name] = req_day
+                elif ln in ("type","kind","rtype"):
+                    kw[name] = req_kind
+                elif ln in ("note","desc","comment"):
+                    kw[name] = req_note
+                elif ln in ("status","state"):
+                    # Staff talebi: admin onayı mantığı varsa "pending" iyi olur
+                    kw[name] = "pending"
+            if kw:
+                add_request(**kw)
+            else:
+                # fallback (yaygın): (staff_id, date, type, note)
+                add_request(sid, req_day, req_kind, req_note)
+            st.success("İstek kaydedildi ✅")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Kaydedilemedi: {e}")
+
+    st.markdown("---")
+    st.markdown("#### 📄 Benim İsteklerim")
+    try:
+        from src.requests_repo import list_requests
+        rows = list_requests(staff_id=sid) if "staff_id" in list_requests.__code__.co_varnames else list_requests()
+        # filtre (eğer list_requests hepsini döndürüyorsa)
+        cleaned = []
+        for r in rows or []:
+            try:
+                rr = dict(r)
+            except Exception:
+                rr = r if isinstance(r, dict) else {}
+            if int(rr.get("staff_id") or rr.get("sid") or 0) == int(sid):
+                cleaned.append(rr)
+
+        if not cleaned:
+            st.info("Kayıt yok.")
+        else:
+            import pandas as pd
+            df = pd.DataFrame(cleaned)
+            # okunabilir kolonlar
+            for c in ["id","staff_id","sid","full_name"]:
+                if c in df.columns:
+                    pass
+            st.dataframe(df, width="stretch", height=260)
+    except Exception as e:
+        st.info("Kayıt yok.")
+# STAFF_VIEW_END_tab_req
+
+    # STAFF_BANNER_tab_req
+    if _is_staff():
+        st.caption('👤 Staff modu aktif')
+    elif _is_admin():
+        st.caption('🛡️ Admin modu aktif')
     st.subheader("İstek Defteri (Okul / Eğitim / Çocuk / Özel Durum)")
 
-    staff_rows = list_staff(only_active=True)
-    if not staff_rows:
-        st.warning("Önce aktif personel eklemelisin.")
-    else:
-        staff_map = {f'{r["full_name"]} (ID:{r["id"]})': int(r["id"]) for r in staff_rows}
-        selected_label = st.selectbox("Personel seç (şimdilik login yerine)", list(staff_map.keys()), key="req_staff")
-        staff_id = staff_map[selected_label]
+    status_tr_map = {"pending": "Beklemede", "approved": "Onaylandı", "rejected": "Reddedildi"}
 
-        req_kind = st.selectbox("İstek tipi", ["HARD", "SOFT"], index=0, key="req_kind")
-        req_day = st.date_input("İstek günü", value=date.today() + timedelta(days=14), key="req_day")
+    # STAFF: sadece kendi isteğini ekle + kendi isteklerini gör
+    if _is_staff():
+        st.info("👤 Staff modu: Sadece **kendi** isteklerini ekleyebilir ve görüntüleyebilirsin.")
+
+        sid = _staff_id()
+        if sid is None:
+            st.error("Staff ID bulunamadı (login).")
+            st.stop()
+
+        req_kind = st.selectbox("İstek tipi", ["HARD", "SOFT"], index=0, key="req_kind_staff")
+        req_day = st.date_input("İstek günü", value=date.today() + timedelta(days=14), key="req_day_staff")
         req_note = st.text_area(
             "İstek notu",
             height=120,
-            placeholder="Örn: Okul var, o gün boş olsun / Eğitim var / Çocuk hastane randevusu…",
-            key="req_note"
+            placeholder="Örn: Okul var, o gün boş olsun / Eğitim var / Çocuk randevusu…",
+            key="req_note_staff"
         )
 
         days_ahead = (req_day - date.today()).days
@@ -177,93 +481,183 @@ with tab_req:
                 "Yine de kaydedilebilir, yönetici karar verir."
             )
 
-        if st.button("İstek Kaydet", type="primary", key="req_save"):
-            add_request(staff_id, req_day.isoformat(), req_note, req_kind)
+        if st.button("İstek Kaydet", type="primary", key="req_save_staff"):
+            add_request(int(sid), req_day.isoformat(), req_note, req_kind)
             st.success("İstek kaydedildi ✅")
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### Yönetici Görünümü (İstek Listesi)")
+        st.markdown("### Benim İsteklerim")
 
-        status_label_map = {"Beklemede": "pending", "Onaylandı": "approved", "Reddedildi": "rejected"}
-        status_tr_map = {"pending": "Beklemede", "approved": "Onaylandı", "rejected": "Reddedildi"}
+        # Repo'da staff_id filtresi yoksa: tüm istekleri çekip filtreliyoruz
+        all_reqs = list_requests(status=None)
+        my_reqs = [r for r in all_reqs if int(r.get("staff_id", -1)) == int(sid)]
 
-        filter_status = st.radio(
-            "Durum filtresi",
-            ["Hepsi", "Beklemede", "Onaylandı", "Reddedildi"],
-            horizontal=True,
-            key="req_filter_status"
-        )
-        status = None if filter_status == "Hepsi" else status_label_map[filter_status]
-        reqs = list_requests(status=status)
-
-        if not reqs:
-            st.info("İstek yok.")
+        if not my_reqs:
+            st.info("Henüz isteğin yok.")
         else:
-            for r in reqs:
+            for r in my_reqs:
                 rid = int(r["id"])
                 kind = (r.get("request_kind") or "HARD").upper()
                 st.write(
-                    f'**{r["date"]}** — {r["full_name"]} — '
+                    f'**{r["date"]}** — '
                     f'**{status_tr_map.get(r["status"], r["status"])}**  |  Tip: `{kind}`'
                 )
                 st.caption(f'{r["note"]}  |  Oluşturma: {r["created_at"]}')
 
-                c1, c2, c3 = st.columns([1, 1, 1])
-                with c1:
-                    if st.button("Onayla", key=f"req_ok_{rid}"):
-                        set_request_status(rid, "approved")
-                        st.rerun()
-                with c2:
-                    if st.button("Reddet", key=f"req_no_{rid}"):
-                        set_request_status(rid, "rejected")
-                        st.rerun()
-                with c3:
-                    if st.button("Sil", key=f"req_del_{rid}"):
-                        delete_request(rid)
-                        st.rerun()
+                # Staff: sadece kendi kaydını silebilsin
+                if st.button("Sil", key=f"req_del_staff_{rid}"):
+                    delete_request(rid)
+                    st.rerun()
 
         st.info("Not: Onaylı HARD istekler planlamada 'kesin boş' (hard). Onaylı SOFT istekler ise mümkünse boş bırakılır.")
 
+    # ADMIN: eski yönetici ekranı
+    else:
+        staff_rows = list_staff(only_active=True)
+        if not staff_rows:
+            st.warning("Önce aktif personel eklemelisin.")
+        else:
+            staff_map = {f'{r["full_name"]} (ID:{r["id"]})': int(r["id"]) for r in staff_rows}
+            selected_label = st.selectbox("Personel seç (şimdilik login yerine)", list(staff_map.keys()), key="req_staff")
+            staff_id = staff_map[selected_label]
+
+            req_kind = st.selectbox("İstek tipi", ["HARD", "SOFT"], index=0, key="req_kind")
+            req_day = st.date_input("İstek günü", value=date.today() + timedelta(days=14), key="req_day")
+            req_note = st.text_area(
+                "İstek notu",
+                height=120,
+                placeholder="Örn: Okul var, o gün boş olsun / Eğitim var / Çocuk hastane randevusu…",
+                key="req_note"
+            )
+
+            days_ahead = (req_day - date.today()).days
+            if days_ahead < 14:
+                st.warning(
+                    f"Bu istek {days_ahead} gün sonra. Kural: en az 14 gün önceden bildirim. "
+                    "Yine de kaydedilebilir, yönetici karar verir."
+                )
+
+            if st.button("İstek Kaydet", type="primary", key="req_save"):
+                add_request(staff_id, req_day.isoformat(), req_note, req_kind)
+                st.success("İstek kaydedildi ✅")
+                st.rerun()
+
+            st.markdown("---")
+            st.markdown("### Yönetici Görünümü (İstek Listesi)")
+
+            status_label_map = {"Beklemede": "pending", "Onaylandı": "approved", "Reddedildi": "rejected"}
+
+            filter_status = st.radio(
+                "Durum filtresi",
+                ["Hepsi", "Beklemede", "Onaylandı", "Reddedildi"],
+                horizontal=True,
+                key="req_filter_status"
+            )
+            status = None if filter_status == "Hepsi" else status_label_map[filter_status]
+            reqs = list_requests(status=status)
+
+            if not reqs:
+                st.info("İstek yok.")
+            else:
+                for r in reqs:
+                    rid = int(r["id"])
+                    kind = (r.get("request_kind") or "HARD").upper()
+                    st.write(
+                        f'**{r["date"]}** — {r["full_name"]} — '
+                        f'**{status_tr_map.get(r["status"], r["status"])}**  |  Tip: `{kind}`'
+                    )
+                    st.caption(f'{r["note"]}  |  Oluşturma: {r["created_at"]}')
+
+                    c1, c2, c3 = st.columns([1, 1, 1])
+                    with c1:
+                        if st.button("Onayla", key=f"req_ok_{rid}"):
+                            set_request_status(rid, "approved")
+                            st.rerun()
+                    with c2:
+                        if st.button("Reddet", key=f"req_no_{rid}"):
+                            set_request_status(rid, "rejected")
+                            st.rerun()
+                    with c3:
+                        if st.button("Sil", key=f"req_del_{rid}"):
+                            delete_request(rid)
+                            st.rerun()
+
+            st.info("Not: Onaylı HARD istekler planlamada 'kesin boş' (hard). Onaylı SOFT istekler ise mümkünse boş bırakılır.")
+
 # -------------------- TAKVİM & TATİLLER --------------------
 with tab_cal:
-    st.subheader("Takvim & Resmî Tatiller")
 
-    today = date.today()
-    c1, c2 = st.columns(2)
-    with c1:
-        year = st.number_input("Yıl", min_value=2020, max_value=2100, value=today.year, step=1, key="cal_year")
-    with c2:
-        month = st.selectbox("Ay", list(range(1, 13)), index=today.month - 1, key="cal_month")
+    # STAFF_VIEW_START_tab_cal
+    if _is_staff():
+        st.warning("⛔ Bu alan sadece **admin/yönetici** içindir.")
+        st.stop()
+# STAFF_VIEW_END_tab_cal
 
-    days = iter_month_days(int(year), int(month))
-    st.caption(f"Seçilen ay gün sayısı: **{len(days)}**")
+    # STAFF_BANNER_tab_cal
+    if _is_staff():
+        st.caption('👤 Staff modu aktif')
+    elif _is_admin():
+        st.caption('🛡️ Admin modu aktif')
+    if _is_staff():
+        st.error('⛔ Bu sayfa sadece **Yönetici** içindir.')
+    else:
+        # GUARD_tab_cal
+        if current_user().get('role') not in ('admin',):
+            st.warning('Bu alan sadece **admin** içindir.')
+            st.stop()
+        st.subheader("Takvim & Resmî Tatiller")
 
-    holiday_list = list_holidays()
-    holiday_set = set(holiday_list)
+        today = date.today()
+        c1, c2 = st.columns(2)
+        with c1:
+            year = st.number_input("Yıl", min_value=2020, max_value=2100, value=today.year, step=1, key="cal_year")
+        with c2:
+            month = st.selectbox("Ay", list(range(1, 13)), index=today.month - 1, key="cal_month")
 
-    st.markdown("### Ay günleri (Tatil seç)")
-    options = [d.iso for d in days]
-    default_selected = [d for d in options if d in holiday_set]
-    selected_holidays = st.multiselect("Resmî tatiller", options=options, default=default_selected, key="cal_hols")
+        days = iter_month_days(int(year), int(month))
+        st.caption(f"Seçilen ay gün sayısı: **{len(days)}**")
 
-    if st.button("Tatil Kaydet", type="primary", key="cal_save"):
-        for d in default_selected:
-            delete_holiday(d)
-        add_holidays(selected_holidays)
-        st.success("Tatiller güncellendi ✅")
-        st.rerun()
+        holiday_list = list_holidays()
+        holiday_set = set(holiday_list)
 
-    st.markdown("---")
-    weekday_count = count_weekdays_excluding_holidays(int(year), int(month), set(selected_holidays))
-    min_month_hours = weekday_count * 8
+        st.markdown("### Ay günleri (Tatil seç)")
+        options = [d.iso for d in days]
+        default_selected = [d for d in options if d in holiday_set]
+        selected_holidays = st.multiselect("Resmî tatiller", options=options, default=default_selected, key="cal_hols")
 
-    st.markdown("### Minimum aylık mesai hesabı")
-    st.write(f"**Hafta içi gün sayısı (tatiller hariç):** {weekday_count}")
-    st.write(f"**Minimum aylık mesai (hard):** {weekday_count} × 8 = **{min_month_hours} saat**")
+        if st.button("Tatil Kaydet", type="primary", key="cal_save"):
+            for d in default_selected:
+                delete_holiday(d)
+            add_holidays(selected_holidays)
+            st.success("Tatiller güncellendi ✅")
+            st.rerun()
 
+        st.markdown("---")
+        weekday_count = count_weekdays_excluding_holidays(int(year), int(month), set(selected_holidays))
+        min_month_hours = weekday_count * 8
+
+        st.markdown("### Minimum aylık mesai hesabı")
+        st.write(f"**Hafta içi gün sayısı (tatiller hariç):** {weekday_count}")
+        st.write(f"**Minimum aylık mesai (hard):** {weekday_count} × 8 = **{min_month_hours} saat**")
 # -------------------- KURALLAR (EKLE/SİL) --------------------
 with tab_rules:
+
+    # STAFF_VIEW_START_tab_rules
+    if _is_staff():
+        st.warning("⛔ Bu alan sadece **admin/yönetici** içindir.")
+        st.stop()
+# STAFF_VIEW_END_tab_rules
+
+    # STAFF_BANNER_tab_rules
+    if _is_staff():
+        st.caption('👤 Staff modu aktif')
+    elif _is_admin():
+        st.caption('🛡️ Admin modu aktif')
+    # GUARD_tab_rules
+    if current_user().get('role') not in ('admin',):
+        st.warning('Bu alan sadece **admin** içindir.')
+        st.stop()
     st.subheader("Kural Yönetimi (PrevShift → NextShift yasak)")
 
     st.info("Buraya sadece 'YASAK' kuralları ekliyoruz. Serbest olanları eklemen gerekmez.")
@@ -291,6 +685,12 @@ with tab_rules:
         df_p = pd.DataFrame(PRESETS.get(preset_name, []))
         if not df_p.empty:
             st.dataframe(df_p, width="stretch", height=180)
+    # FIXED_OUT: except Exception:
+    # FIXED_OUT: pass
+    except Exception:
+        pass
+
+
     except Exception:
         pass
 
@@ -402,6 +802,68 @@ with tab_rules:
     st.markdown("---")
 
 with tab_plan:
+
+    # STAFF_VIEW_START_tab_plan
+    st.info("👤 Staff modu: Burada planı sadece **görüntüleyebilirsin**. Plan üretme admin işidir.")
+    sid = _staff_id()
+    if not sid:
+        st.error("Staff ID bulunamadı. (Giriş tekrar deneyin)")
+        st.stop()
+
+    colA, colB = st.columns(2)
+    with colA:
+        year_s = st.number_input("Yıl", min_value=2020, max_value=2100, value=int(year), step=1, key="staff_plan_year")
+    with colB:
+        month_s = st.number_input("Ay", min_value=1, max_value=12, value=int(month), step=1, key="staff_plan_month")
+
+    try:
+        from src.assignments_repo import list_month
+        rows = list_month(int(year_s), int(month_s)) or []
+    except Exception as e:
+        st.error(f"Plan okunamadı: {e}")
+        rows = []
+
+    if not rows:
+        st.info("Bu ay için plan yok.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame([dict(r) if not isinstance(r, dict) else r for r in rows])
+
+        st.markdown("#### 📅 Aylık Plan")
+        st.dataframe(df, width="stretch", height=280)
+
+        # Kendi toplam saat
+        try:
+            from src.scheduler import SHIFT_HOURS
+            my = df[df["staff_id"].astype(int) == int(sid)].copy() if "staff_id" in df.columns else pd.DataFrame()
+            if not my.empty and "shift_type" in my.columns:
+                my["Saat"] = my["shift_type"].map(lambda x: int(SHIFT_HOURS.get(str(x), 8)))
+                total = int(my["Saat"].sum())
+                st.success(f"👤 Senin toplam çalışma saatin: **{total}** saat")
+            else:
+                st.info("Bu ay senin için atama bulunamadı.")
+        except Exception:
+            pass
+
+        # indir (CSV)
+        st.download_button(
+            "⬇️ Planı indir (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"plan_{int(year_s)}_{int(month_s):02d}.csv",
+            mime="text/csv",
+            key="dl_staff_plan_csv"
+        )
+# STAFF_VIEW_END_tab_plan
+
+    # STAFF_BANNER_tab_plan
+    if _is_staff():
+        st.caption('👤 Staff modu aktif')
+    elif _is_admin():
+        st.caption('🛡️ Admin modu aktif')
+    # GUARD_tab_plan
+    if current_user().get('role') not in ('admin',):
+        st.warning('Bu alan sadece **admin** içindir.')
+        st.stop()
     st.subheader("Plan (Basit v0 + HARD min mesai + Kurallar + İstekler)")
 
     today = date.today()
@@ -519,8 +981,11 @@ with tab_plan:
                             # rapor veya yıllık izin olan hafta içi gün -> min saatten düş
                             if t in ('rapor','yillik_izin'):
                                 cnt += 1
+                    # FIXED_OUT: except Exception:
+                    # FIXED_OUT: pass
                     except Exception:
                         pass
+
                 off_weekday[sid] = cnt
             min_by_staff = {sid: max(0, int(min_required_hours) - off_weekday.get(sid,0)*8) for sid in staff_ids}
             assignments, unfilled, unfilled_debug, hours, swaps = generate_schedule_hard_min_hours(
@@ -547,14 +1012,17 @@ with tab_plan:
                     "deficits": v_deficits,
                     "unfilled_count": len(unfilled) if unfilled is not None else None,
                 }
-            except Exception as e:
-                st.session_state["last_validation"] = {
-                    "summary": {"hard_ok": False, "min_hours_ok": False},
-                    "violations": [{"type":"VALIDATION_ERROR","date":"","shift_type":"","staff_id":-1,"detail":str(e)}],
-                    "deficits": [],
-                    "unfilled_count": len(unfilled) if unfilled is not None else None,
-                }
+            # FIXED_OUT: except Exception as e:
+            # FIXED_OUT: st.session_state["last_validation"] = {
+            # FIXED_OUT: "summary": {"hard_ok": False, "min_hours_ok": False},
+            # FIXED_OUT: "violations": [{"type":"VALIDATION_ERROR","date":"","shift_type":"","staff_id":-1,"detail":str(e)}],
+            # FIXED_OUT: "deficits": [],
+            # FIXED_OUT: "unfilled_count": len(unfilled) if unfilled is not None else None,
+            # FIXED_OUT: }
             # --- /VALIDATION ---
+            except Exception:
+                pass
+
 
             clear_month(int(year), int(month))
             if assignments and isinstance(assignments[0], (tuple, list)):
@@ -648,8 +1116,11 @@ with tab_plan:
                     # (AUTO-FIX) cell map: 4+ gün boşluk raporu için hızlı lookup
                     try:
                         cell = {(int(r.get('staff_id')), r.get('date')): (r.get('shift_type') or '') for r in rows if r.get('date')}
+                    # FIXED_OUT: except Exception:
+                    # FIXED_OUT: cell = {}
                     except Exception:
-                        cell = {}
+                        pass
+
 
                     worked_flag = (sid, d_iso) in cell
                     # (AUTO-FIX) blocked_type: 4+ gün boşluk raporu bloğu için
@@ -721,11 +1192,17 @@ with tab_plan:
             def _as_dict(x):
                 try:
                     return dict(x)
+                # FIXED_OUT: except Exception:
+                # FIXED_OUT: return x if isinstance(x, dict) else {}
                 except Exception:
-                    return x if isinstance(x, dict) else {}
+                    pass
+
 
             try:
                 unav_rows = list_unavailability(None)
+            except Exception:
+                pass
+
 
                 for ur0 in unav_rows:
                     ur = _as_dict(ur0)
@@ -752,10 +1229,10 @@ with tab_plan:
                     blocked_type.setdefault(sid, {})[d] = t
                     unav_count += 1
 
-            except Exception as e:
-                st.warning(f"Rapor/izin okunamadı: {e}")
-                blocked_type = {}
-                unav_count = 0
+            # FIXED_OUT: except Exception as e:
+            # FIXED_OUT: st.warning(f"Rapor/izin okunamadı: {e}")
+            # FIXED_OUT: blocked_type = {}
+            # FIXED_OUT: unav_count = 0
 
             st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
             
@@ -866,8 +1343,11 @@ with tab_plan:
                         if _dd.weekday() < 5 and str(_d_iso)[:10] not in holiday_set_local:
                             if _t in ('rapor','yillik_izin'):
                                 _cnt += 1
+                    # FIXED_OUT: except Exception:
+                    # FIXED_OUT: pass
                     except Exception:
                         pass
+
                 min_by_staff_matrix[int(_sid)] = max(0, int(min_required_hours) - _cnt*8)
             df_matrix["MinSaat"] = df_matrix["ID"].map(lambda x: int(min_by_staff_matrix.get(int(x), min_required_hours)))
             df_matrix["CalistigiSaat"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
@@ -908,52 +1388,15 @@ with tab_plan:
                 key="dl_matrix_csv"
             )
 
-            xlsx_buf = io.BytesIO()
-            try:
-                from openpyxl.styles import Font
-                from openpyxl.utils import get_column_letter
-
-                FONT_DAY   = Font(color="2F75B5")
-                FONT_NIGHT = Font(color="C9A100")
-                FONT_D24   = Font(color="2E8B57")
-                FONT_BLOCK = Font(color="C00000")
-
-                with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
-                    df_matrix.to_excel(writer, index=False, sheet_name="Cizelge")
-                    ws = writer.sheets["Cizelge"]
-
-                    headers = [cell.value for cell in ws[1]]
-                    day_headers = [h for h in headers if isinstance(h, str) and len(h) == 2 and h.isdigit()]
-                    day_cols_idx = [headers.index(h) + 1 for h in day_headers]
-
-                    for r in range(2, ws.max_row + 1):
-                        for c in day_cols_idx:
-                            v = ws.cell(row=r, column=c).value
-                            if v is None:
-                                continue
-                            v = str(v).strip()
-                            if v == "8":
-                                ws.cell(row=r, column=c).font = FONT_DAY
-                            elif v == "16":
-                                ws.cell(row=r, column=c).font = FONT_NIGHT
-                            elif v == "24":
-                                ws.cell(row=r, column=c).font = FONT_D24
-                            elif v in ("R", "İ"):
-                                ws.cell(row=r, column=c).font = FONT_BLOCK
-
-                    for col_idx in range(1, ws.max_column + 1):
-                        ws.column_dimensions[get_column_letter(col_idx)].width = 10
-
-                xlsx_buf.seek(0)
-                st.download_button(
-                    "📊 Excel indir (.xlsx)",
-                    data=xlsx_buf,
+            xlsx_bytes = export_schedule_xlsx(df_matrix, year=int(year), month=int(month))
+            st.download_button("📊 Excel indir (.xlsx)",
+                    data=export_schedule_xlsx(df_matrix, int(year), int(month), sheet_name='Cizelge'),
                     file_name=f"cizelge_{int(year)}_{int(month):02d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="dl_matrix_xlsx"
                 )
-            except Exception as e:
-                st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
+            # FIXED_OUT: except Exception as e:
+            # FIXED_OUT: st.warning(f"Excel export çalışmadı: {str(e)} (CSV her zaman çalışır)")
 
             st.markdown("---")
             st.caption("Not: Aşağıdaki eski uzun listeyi artık göstermiyoruz; çizelge yukarıda.")

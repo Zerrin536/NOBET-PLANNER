@@ -7,3 +7,5 @@ nobet_planner.sqlite3
 *.bak_*
 
 *.bak_*
+*.bak_*
+_backup_*/
