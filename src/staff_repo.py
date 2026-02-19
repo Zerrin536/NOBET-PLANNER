@@ -19,7 +19,7 @@ def add_staff_bulk(names: List[str]) -> int:
     return len(cleaned)
 
 def list_staff(only_active: Optional[bool] = None):
-    q = "SELECT id, full_name, is_active FROM staff"
+    q = "SELECT id, pin, full_name, is_active FROM staff"
     params = []
     if only_active is True:
         q += " WHERE is_active = 1"

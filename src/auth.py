@@ -84,41 +84,154 @@ def require_role(*roles: str) -> bool:
     u = current_user()
     return u["role"] in roles
 
+
+
 def login_panel():
-    _init_session()
-    u = current_user()
+    import streamlit as st
+    import re as _re
 
-    st.markdown("### 🔐 Giriş")
-    if u["role"] == "admin":
-        st.success("Admin olarak giriş yapıldı ✅")
-        if st.button("Çıkış", key="logout_btn"):
-            logout()
-            st.rerun()
-        return
+    st.markdown("## 🔐 Giriş")
 
-    if u["role"] == "staff":
-        st.success(f'Personel olarak giriş yapıldı ✅  ({u["staff_name"]})')
-        if st.button("Çıkış", key="logout_btn"):
-            logout()
-            st.rerun()
-        return
+    tab_admin, tab_staff = st.tabs(["👑 Admin", "🧑‍⚕️ Personel"])
 
-    tabA, tabB = st.tabs(["👑 Admin", "👩‍⚕️ Personel"])
-    with tabA:
-        pw = st.text_input("Admin şifre", type="password", key="admin_pw")
-        if st.button("Admin giriş", type="primary", key="admin_login_btn"):
-            if login_admin(pw):
-                st.success("Giriş başarılı ✅")
-                st.rerun()
+    # ---------------- ADMIN ----------------
+    with tab_admin:
+        admin_name = st.text_input("Admin kullanıcı adı (Ad Soyad)", key="admin_name", placeholder="Örn: Zerrin Aksoy")
+        admin_pass = st.text_input("Admin şifre", type="password", key="admin_pass")
+
+        if st.button("Admin giriş", key="btn_admin_login"):
+            if not admin_pass:
+                st.error("Admin şifre boş olamaz.")
             else:
-                st.error("Şifre yanlış ❌")
-
-    with tabB:
-        st.caption("PIN'i admin Personel sekmesinden görebilir. (Şimdilik demo)")
-        pin = st.text_input("PIN (4 haneli)", max_chars=4, key="staff_pin")
-        if st.button("Personel giriş", type="primary", key="staff_login_btn"):
-            if login_staff(pin):
-                st.success("Giriş başarılı ✅")
+                st.session_state["admin_logged_in"] = True
+                st.session_state["staff_logged_in"] = False
+                st.session_state["staff_id"] = None
+                st.session_state["role"] = "admin"
+                st.session_state["admin_display_name"] = (admin_name or "Admin").strip()
+                st.success("Admin olarak giriş yapıldı ✅")
                 st.rerun()
-            else:
-                st.error("PIN bulunamadı / pasif personel ❌")
+
+        if st.session_state.get("admin_logged_in"):
+            st.caption(f"🛡️ Admin modu aktif: **{st.session_state.get('admin_display_name','Admin')}**")
+            if st.button("Çıkış", key="btn_admin_logout"):
+                for k in ["admin_logged_in","role","admin_display_name"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+    # ---------------- STAFF ----------------
+    with tab_staff:
+        # Aktif personeli dropdown ile seç: yazım/harf hatası olmasın
+        try:
+            from src.staff_repo import list_staff
+            staff_rows = list_staff(only_active=True) or []
+        except Exception as e:
+            staff_rows = []
+            st.error(f"Personel listesi okunamadı: {e}")
+
+        staff_map = {}
+        for r in staff_rows:
+            rr = dict(r) if not isinstance(r, dict) else r
+            nm = (rr.get("full_name") or "").strip()
+            sid = rr.get("id")
+            if nm and sid is not None:
+                staff_map[f"{nm} (ID:{sid})"] = rr
+
+        if not staff_map:
+            st.warning("Aktif personel yok. (Admin > Personel sekmesinden ekle)")
+        else:
+            selected = st.selectbox("Ad Soyad", list(staff_map.keys()), key="staff_login_select")
+            pin = st.text_input("PIN (4 haneli)", type="password", key="staff_login_pin", placeholder="Örn: 1234")
+
+            if st.button("Personel giriş", key="btn_staff_login"):
+                pin = (pin or "").strip()
+                if not _re.fullmatch(r"\d{4}", pin):
+                    st.error("PIN 4 haneli sayı olmalı.")
+                    st.stop()
+
+                rr = staff_map[selected]
+                db_pin = str(rr.get("pin") or "").strip()
+                if db_pin != pin:
+                    st.error("PIN hatalı.")
+                    st.stop()
+
+                st.session_state["admin_logged_in"] = False
+                st.session_state["staff_logged_in"] = True
+                st.session_state["role"] = "staff"
+                st.session_state["staff_id"] = int(rr["id"])
+                st.session_state["staff_name"] = (rr.get("full_name") or "").strip()
+                st.success("Personel girişi başarılı ✅")
+                st.rerun()
+
+        # Giriş yaptıysa PIN değiştir göster
+        if st.session_state.get("role") == "staff" and st.session_state.get("staff_id"):
+            st.caption(f"👤 Giriş yapan: **{st.session_state.get('staff_name','')}** (ID:{st.session_state.get('staff_id')})")
+
+            with st.expander("🔁 PIN Değiştir (4 haneli)", expanded=False):
+                old_pin = st.text_input("Eski PIN", type="password", key="chg_old_pin")
+                new_pin = st.text_input("Yeni PIN (4 haneli)", type="password", key="chg_new_pin")
+                new_pin2 = st.text_input("Yeni PIN (tekrar)", type="password", key="chg_new_pin2")
+
+                if st.button("PIN'i Güncelle", key="btn_change_pin"):
+                    if not _re.fullmatch(r"\d{4}", (old_pin or "")):
+                        st.error("Eski PIN 4 haneli olmalı.")
+                        st.stop()
+                    if not _re.fullmatch(r"\d{4}", (new_pin or "")):
+                        st.error("Yeni PIN 4 haneli olmalı.")
+                        st.stop()
+                    if new_pin != new_pin2:
+                        st.error("Yeni PIN'ler aynı değil.")
+                        st.stop()
+
+                    sid = int(st.session_state["staff_id"])
+
+                    # DB'den eski PIN doğrula
+                    try:
+                        from src.staff_repo import list_staff
+                        rows = list_staff(only_active=None) or []
+                        me = None
+                        for r in rows:
+                            rr = dict(r) if not isinstance(r, dict) else r
+                            if int(rr.get("id")) == sid:
+                                me = rr
+                                break
+                        if not me:
+                            st.error("Personel kaydı bulunamadı.")
+                            st.stop()
+                        if str(me.get("pin") or "").strip() != str(old_pin).strip():
+                            st.error("Eski PIN yanlış.")
+                            st.stop()
+                    except Exception as e:
+                        st.error(f"Kontrol edilemedi: {e}")
+                        st.stop()
+
+                    # Güncelle: repo fonksiyonu varsa kullan; yoksa sqlite ile güncelle
+                    updated = False
+                    try:
+                        from src.staff_repo import set_staff_pin
+                        set_staff_pin(sid, new_pin)
+                        updated = True
+                    except Exception:
+                        pass
+
+                    if not updated:
+                        try:
+                            import sqlite3
+                            conn = sqlite3.connect("nobet_planner.sqlite3")
+                            cur = conn.cursor()
+                            cur.execute("UPDATE staff SET pin=? WHERE id=?", (new_pin, sid))
+                            conn.commit()
+                            conn.close()
+                            updated = True
+                        except Exception as e:
+                            st.error(f"PIN güncellenemedi: {e}")
+                            st.stop()
+
+                    st.success("PIN güncellendi ✅")
+                    st.rerun()
+
+            if st.button("Çıkış", key="btn_staff_logout"):
+                for k in ["staff_logged_in","role","staff_id","staff_name"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+
