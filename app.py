@@ -623,6 +623,27 @@ with tab_req:
     # -------------------- TAKVİM & TATİLLER --------------------
 
 with tab_cal:
+
+    # ADMIN ONLY (Takvim & Tatiller)
+
+    try:
+
+        u = current_user() or {}
+
+        role = str(u.get('role') or st.session_state.get('role') or st.session_state.get('auth_role') or '').lower().strip()
+
+    except Exception:
+
+        role = str(st.session_state.get('role') or st.session_state.get('auth_role') or '').lower().strip()
+
+    if role != 'admin':
+
+        st.warning('⛔ Bu alan sadece **admin/yönetici** içindir.')
+
+        st.caption('Personel hesabıyla giriş yaptın. Bu sekmeye erişim yok.')
+
+        st.stop()
+
     st.caption("DEBUG tab_cal render ✅")
     try:
         st.caption(f"DEBUG role={_role()} staff_id={_staff_id()}")
@@ -764,12 +785,7 @@ with tab_rules:
 
 with tab_plan:
     try:
-        st.caption('📋 Plan sekmesi render oldu ✅')
         # (DEBUG) role/staff_id
-        try:
-            st.caption(f"role={{_role()}} staff_id={{_staff_id()}}")
-        except Exception:
-            pass
             if _is_staff():
                 st.info("👤 Staff modu: Burada planı sadece **görüntüleyebilirsin**. Plan üretme admin işidir.")
                 sid = _staff_id()
