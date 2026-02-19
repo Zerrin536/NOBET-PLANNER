@@ -9,3 +9,8 @@ nobet_planner.sqlite3
 *.bak_*
 *.bak_*
 _backup_*/
+
+# local backups
+_LOCAL_BAD_BACKUP/
+*.bak_*
+_backup_*/
