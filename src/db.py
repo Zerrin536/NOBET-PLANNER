@@ -26,6 +26,7 @@ def init_db() -> None:
             staff_id INTEGER NOT NULL,
             date TEXT NOT NULL,
             type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'approved',
             note TEXT,
             UNIQUE(staff_id, date, type),
             FOREIGN KEY (staff_id) REFERENCES staff(id)
@@ -67,5 +68,19 @@ def init_db() -> None:
             value TEXT NOT NULL
         );
         """)
+
+        cur.execute("PRAGMA table_info(unavailability)")
+        unav_cols = {row["name"] for row in cur.fetchall()}
+        if "status" not in unav_cols:
+            cur.execute("ALTER TABLE unavailability ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
+            cur.execute(
+                """
+                UPDATE unavailability
+                SET status = CASE
+                    WHEN COALESCE(note, '') LIKE '%ONAY BEKLIYOR%' THEN 'pending'
+                    ELSE 'approved'
+                END
+                """
+            )
 
         conn.commit()

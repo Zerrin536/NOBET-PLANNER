@@ -19,6 +19,8 @@ def build_blocked_days_with_type(
 
     # rapor / yıllık izin (hard)
     for r in rows:
+        if str(r["status"]).lower() != "approved":
+            continue
         sid = int(r["staff_id"])
         d = str(r["date"])
         t = str(r["type"])  # rapor | yillik_izin

@@ -38,6 +38,18 @@ def add_rule(prev_type: str, next_type: str, apply_day: str = "ANY", note: str =
     conn = ensure_rules_table()
     cur = conn.cursor()
     cur.execute(
+        "SELECT id FROM rules WHERE prev_type=? AND next_type=? AND apply_day=? ORDER BY id DESC LIMIT 1",
+        (prev_type, next_type, apply_day),
+    )
+    row = cur.fetchone()
+    if row:
+        cur.execute(
+            "UPDATE rules SET note=?, is_active=1 WHERE id=?",
+            (note or "", int(row["id"])),
+        )
+        conn.commit()
+        return int(row["id"])
+    cur.execute(
         "INSERT INTO rules(prev_type, next_type, apply_day, is_active, note) VALUES(?,?,?,1,?)",
         (prev_type, next_type, apply_day, note or ""),
     )
@@ -60,6 +72,19 @@ def set_rule_active(rule_id: int, is_active: bool):
     conn = ensure_rules_table()
     cur = conn.cursor()
     cur.execute("UPDATE rules SET is_active=? WHERE id=?", (1 if is_active else 0, rule_id))
+    conn.commit()
+
+def update_rule(rule_id: int, prev_type: str, next_type: str, apply_day: str = "ANY", note: str = "", is_active: bool = True):
+    conn = ensure_rules_table()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE rules
+        SET prev_type=?, next_type=?, apply_day=?, note=?, is_active=?
+        WHERE id=?
+        """,
+        (prev_type, next_type, apply_day, note or "", 1 if is_active else 0, rule_id),
+    )
     conn.commit()
 
 def delete_rule(rule_id: int):
