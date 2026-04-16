@@ -1173,12 +1173,15 @@ with tab_plan:
                         df_matrix_staff["ToplamMesaiSaati"] = df_matrix_staff["ID"].map(lambda x: int(worked_staff.get(int(x), 0)))
                         df_matrix_staff["MesaiFarki"] = df_matrix_staff["ToplamMesaiSaati"] - df_matrix_staff["GerekliMesaiSaati"]
                         df_matrix_staff["Not"] = df_matrix_staff["ID"].map(lambda x: note_staff.get(int(x), ""))
+                        df_matrix_staff = df_matrix_staff.sort_values(["ID"]).reset_index(drop=True)
 
                         st.markdown("#### 📊 Aylık Çizelge")
                         COLOR_DAY = "#2F75B5"
                         COLOR_NIGHT = "#C9A100"
                         COLOR_D24 = "#2E8B57"
                         COLOR_BLOCK = "#C00000"
+                        COLOR_POSITIVE = "#1F7A3D"
+                        COLOR_NEGATIVE = "#C00000"
 
                         def style_staff_matrix(data: pd.DataFrame):
                             styles = pd.DataFrame("", index=data.index, columns=data.columns)
@@ -1193,6 +1196,16 @@ with tab_plan:
                                         styles.loc[i, c] = f"color: {COLOR_D24};"
                                     elif v in ("R", "İ"):
                                         styles.loc[i, c] = f"color: {COLOR_BLOCK};"
+                            if "MesaiFarki" in data.columns:
+                                for i in data.index:
+                                    try:
+                                        diff_val = float(data.loc[i, "MesaiFarki"])
+                                    except Exception:
+                                        diff_val = 0
+                                    if diff_val > 0:
+                                        styles.loc[i, "MesaiFarki"] = f"color: {COLOR_POSITIVE}; font-weight: 600;"
+                                    elif diff_val < 0:
+                                        styles.loc[i, "MesaiFarki"] = f"color: {COLOR_NEGATIVE}; font-weight: 600;"
                             return styles
 
                         df_matrix_staff = df_matrix_staff[
@@ -1705,13 +1718,13 @@ with tab_plan:
                         st.markdown("---")
 
 
-                        st.markdown("### 📊 Aylık Çizelge (Sadece Yazı Rengi)")
+                        st.markdown("### 📊 Aylık Çizelge ")
                         st.caption(f"Bu ay rapor/izin kaydı: {unav_count}")
                         day_cols = [str(int(d.iso.split("-")[2])).zfill(2) for d in day_infos]
     
                         staff_df = pd.DataFrame(
                             [{"Personel": staff_name_by_id.get(sid, f"ID:{sid}"), "ID": sid} for sid in staff_ids]
-                        ).sort_values(["Personel", "ID"]).reset_index(drop=True)
+                        ).sort_values(["ID"]).reset_index(drop=True)
     
                         matrix_rows = []
                         for _, rr in staff_df.iterrows():
@@ -1799,6 +1812,7 @@ with tab_plan:
                         df_matrix["GerekliMesaiSaati"] = df_matrix["ID"].map(lambda x: int(min_by_staff_matrix.get(int(x), min_required_hours)))
                         df_matrix["ToplamMesaiSaati"] = df_matrix["ID"].map(lambda x: worked.get(int(x), 0))
                         df_matrix["MesaiFarki"] = df_matrix["ToplamMesaiSaati"] - df_matrix["GerekliMesaiSaati"]
+                        df_matrix = df_matrix.sort_values(["ID"]).reset_index(drop=True)
 
                         ordered_cols = ["Personel", "ID"] + day_cols + ["GerekliMesaiSaati", "ToplamMesaiSaati", "MesaiFarki", "Not"]
                         df_matrix = df_matrix[ordered_cols]
@@ -1807,7 +1821,9 @@ with tab_plan:
                         COLOR_NIGHT = "#C9A100"
                         COLOR_D24   = "#2E8B57"
                         COLOR_BLOCK = "#C00000"
-    
+                        COLOR_POSITIVE = "#1F7A3D"
+                        COLOR_NEGATIVE = "#C00000"
+
                         def style_text_only(data: pd.DataFrame):
                             styles = pd.DataFrame("", index=data.index, columns=data.columns)
                             for c in day_cols:
@@ -1821,6 +1837,16 @@ with tab_plan:
                                         styles.loc[i, c] = f"color: {COLOR_D24};"
                                     elif v in ("R", "İ"):
                                         styles.loc[i, c] = f"color: {COLOR_BLOCK};"
+                            if "MesaiFarki" in data.columns:
+                                for i in data.index:
+                                    try:
+                                        diff_val = float(data.loc[i, "MesaiFarki"])
+                                    except Exception:
+                                        diff_val = 0
+                                    if diff_val > 0:
+                                        styles.loc[i, "MesaiFarki"] = f"color: {COLOR_POSITIVE}; font-weight: 600;"
+                                    elif diff_val < 0:
+                                        styles.loc[i, "MesaiFarki"] = f"color: {COLOR_NEGATIVE}; font-weight: 600;"
                             return styles
     
                         styler = df_matrix.style.apply(style_text_only, axis=None)
