@@ -14,11 +14,12 @@ class Shift:
 
 SHIFT_HOURS = {"DAY": 8, "NIGHT": 16, "D24": 24}
 
-def build_required_shifts(year: int, month: int) -> List[Shift]:
+def build_required_shifts(year: int, month: int, holiday_isos: Optional[Set[str]] = None) -> List[Shift]:
     shifts: List[Shift] = []
+    holiday_isos = holiday_isos or set()
     days = iter_month_days(year, month)
     for d in days:
-        if d.is_weekend:
+        if d.iso in holiday_isos or d.is_weekend:
             for _ in range(12):
                 shifts.append(Shift(d.iso, "D24"))
         else:
@@ -212,11 +213,12 @@ def generate_schedule(
     month: int,
     staff_ids: List[int],
     blocked_any: Dict[int, Set[str]],
+    holiday_isos: Optional[Set[str]] = None,
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     soft_avoid: Optional[Dict[int, Set[str]]] = None,
 ) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], List[Dict]]:
-    required = build_required_shifts(year, month)
+    required = build_required_shifts(year, month, holiday_isos=holiday_isos)
     counts = {sid: 0 for sid in staff_ids}
     assigned_by_day: Dict[str, List[Tuple[int, ShiftType]]] = {}
     soft_avoid = soft_avoid or {}
@@ -351,12 +353,14 @@ def generate_schedule_hard_min_hours(
     staff_ids: List[int],
     blocked_any: Dict[int, Set[str]],
     min_required_hours: int | Dict[int, int],
+    holiday_isos: Optional[Set[str]] = None,
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
     soft_avoid: Optional[Dict[int, Set[str]]] = None,
 ) -> Tuple[List[Tuple[str, ShiftType, int]], List[Shift], List[Dict], Dict[int, int], int]:
     assignments, unfilled, unfilled_debug = generate_schedule(
         year, month, staff_ids, blocked_any,
+        holiday_isos=holiday_isos,
         transition_rules=transition_rules,
         blocked_type=blocked_type,
         soft_avoid=soft_avoid
@@ -375,11 +379,13 @@ def validate_assignments(
     staff_ids: List[int],
     blocked_any: Dict[int, Set[str]],
     min_required_hours: int,
+    holiday_isos: Optional[Set[str]] = None,
     transition_rules: List[Dict] | None = None,
     blocked_type: Optional[Dict[int, Dict[str, str]]] = None,
 ) -> Tuple[Dict, List[Dict], List[int]]:
     transition_rules = transition_rules or []
     blocked_type = blocked_type or {}
+    holiday_isos = holiday_isos or set()
 
     hours = _compute_hours(assignments, staff_ids)
     deficits = [sid for sid in staff_ids if hours.get(sid, 0) < min_required_hours]
@@ -429,6 +435,25 @@ def validate_assignments(
                 "shift_type": "",
                 "staff_id": sid,
                 "detail": f"Aynı günde {cnt} vardiya"
+            })
+
+    for d, stype, sid in assignments:
+        is_weekend = _is_weekend(d)
+        if d in holiday_isos and stype != "D24":
+            violations.append({
+                "type": "HOLIDAY_MUST_BE_D24",
+                "date": d,
+                "shift_type": stype,
+                "staff_id": sid,
+                "detail": "Resmi tatil gunlerinde sadece D24 yazilabilir"
+            })
+        elif (not is_weekend) and d not in holiday_isos and stype == "D24":
+            violations.append({
+                "type": "WEEKDAY_NON_HOLIDAY_CANNOT_BE_D24",
+                "date": d,
+                "shift_type": stype,
+                "staff_id": sid,
+                "detail": "Resmi tatil olmayan hafta ici gunlerinde D24 yazilamaz"
             })
 
     # transition violations

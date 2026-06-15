@@ -16,7 +16,8 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS staff (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
+            is_active INTEGER NOT NULL DEFAULT 1,
+            pin TEXT
         );
         """)
 
@@ -68,6 +69,11 @@ def init_db() -> None:
             value TEXT NOT NULL
         );
         """)
+
+        cur.execute("PRAGMA table_info(staff)")
+        staff_cols = {row["name"] for row in cur.fetchall()}
+        if "pin" not in staff_cols:
+            cur.execute("ALTER TABLE staff ADD COLUMN pin TEXT")
 
         cur.execute("PRAGMA table_info(unavailability)")
         unav_cols = {row["name"] for row in cur.fetchall()}

@@ -17,6 +17,7 @@ from src.requests_repo import (
 from src.holidays_repo import (
     add_holidays, list_holidays, delete_holiday
 )
+from src.tr_holidays import list_default_turkish_holidays, get_default_turkish_holiday_map
 from src.calendar_utils import (
     iter_month_days, count_weekdays_excluding_holidays
 )
@@ -753,12 +754,16 @@ with tab_cal:
     days = iter_month_days(int(year), int(month))
     holiday_set = set(list_holidays())
     options = [d.iso for d in days]
-    default_selected = [d for d in options if d in holiday_set]
+    auto_holiday_map = {d: name for d, name in get_default_turkish_holiday_map(int(year), int(month)).items() if d in options}
+    auto_holidays = [d for d in list_default_turkish_holidays(int(year), int(month)) if d in options]
+    saved_month_holidays = [d for d in options if d in holiday_set]
+    default_selected = sorted(saved_month_holidays if saved_month_holidays else auto_holidays)
+    holiday_state_key = f"holiday_grid_selected_{int(year)}_{int(month):02d}"
 
     if can_edit_calendar:
-        st.session_state.setdefault("holiday_grid_selected", list(default_selected))
-        st.session_state["holiday_grid_selected"] = [d for d in st.session_state["holiday_grid_selected"] if d in options]
-        selected_set = set(st.session_state["holiday_grid_selected"])
+        st.session_state.setdefault(holiday_state_key, list(default_selected))
+        st.session_state[holiday_state_key] = [d for d in st.session_state[holiday_state_key] if d in options]
+        selected_set = set(st.session_state[holiday_state_key])
     else:
         selected_set = set(default_selected)
     selected_holidays = sorted(selected_set)
@@ -830,8 +835,9 @@ with tab_cal:
                 day_num = int(d_iso.split("-")[2])
                 is_sel = d_iso in selected_set
                 is_weekend = c >= 5
-                label = f"{'• ' if is_sel else ''}{day_num}"
-                help_text = f"{d_iso} {'| Tatil secili' if is_sel else '| Normal gun'}{' | Hafta sonu' if is_weekend else ''}"
+                holiday_name = auto_holiday_map.get(d_iso, "")
+                label = f"{'🔴 ' if is_sel else ''}{day_num}"
+                help_text = f"{d_iso} {'| Tatil secili' if is_sel else '| Normal gun'}{' | Hafta sonu' if is_weekend else ''}{' | ' + holiday_name if holiday_name else ''}"
 
                 if row[c].button(
                     label,
@@ -845,16 +851,24 @@ with tab_cal:
                     else:
                         selected_set.add(d_iso)
                     if can_edit_calendar:
-                        st.session_state["holiday_grid_selected"] = sorted(selected_set)
+                        st.session_state[holiday_state_key] = sorted(selected_set)
                     st.rerun()
 
     with right:
         st.markdown('<div class="cal-section-title">Secili Tarihler</div>', unsafe_allow_html=True)
         if selected_holidays:
             for d_iso in selected_holidays:
-                st.write(f"`{d_iso}`")
+                holiday_name = auto_holiday_map.get(d_iso)
+                st.write(f"`{d_iso}`{' - ' + holiday_name if holiday_name else ''}")
         else:
             st.info("Bu ay icin secili tatil yok.")
+
+        st.markdown('<div class="cal-section-title">Otomatik Resmi Tatiller</div>', unsafe_allow_html=True)
+        if auto_holidays:
+            for d_iso in auto_holidays:
+                st.write(f"`{d_iso}` - {auto_holiday_map.get(d_iso, '-')}")
+        else:
+            st.caption("Bu ay icin otomatik resmi tatil bulunmadi.")
 
         st.markdown('<div class="cal-section-title">Hesap Ozeti</div>', unsafe_allow_html=True)
         st.write(f"Hafta ici gun: **{weekday_count}**")
@@ -1333,10 +1347,9 @@ with tab_plan:
                     staff_ids = [int(r["id"]) for r in staff_rows]
                     staff_name_by_id = {int(r["id"]): r["full_name"] for r in staff_rows}
     
-                    required = build_required_shifts(int(year), int(month))
-                    st.caption(f"Bu ay toplam slot: **{len(required)}** (hafta içi 24 kişi/gün, hafta sonu 12 kişi/gün)")
-
                     holiday_set = set(list_holidays())
+                    required = build_required_shifts(int(year), int(month), holiday_isos=holiday_set)
+                    st.caption(f"Bu ay toplam slot: **{len(required)}** (hafta ici normal gunlerde 24 kisi/gun, hafta sonu ve resmi tatillerde 12 kisi/gun D24)")
                     weekday_count = count_weekdays_excluding_holidays(int(year), int(month), holiday_set)
                     min_required_hours = weekday_count * 8
                     st.info(f"Hard kural: Her çalışan en az **{min_required_hours} saat** çalışmalı.")
@@ -1507,6 +1520,7 @@ with tab_plan:
                         min_by_staff = {sid: max(0, int(min_required_hours) - off_weekday.get(sid,0)*8) for sid in staff_ids}
                         assignments, unfilled, unfilled_debug, hours, swaps = generate_schedule_hard_min_hours(
                             int(year), int(month), staff_ids, blocked_any, min_by_staff,
+                            holiday_isos=holiday_set,
                             transition_rules=transition_rules,
                             blocked_type=blocked_type,
                             soft_avoid=soft_avoid
@@ -1520,6 +1534,7 @@ with tab_plan:
                                 staff_ids,
                                 blocked_any,
                                 min_required_hours,
+                                holiday_isos=holiday_set,
                                 transition_rules=transition_rules,
                                 blocked_type=blocked_type
                             )
@@ -1637,9 +1652,9 @@ with tab_plan:
                             else:
                                 cell.setdefault(key, stype)
 
-                        # ===== 4+ GÜN BOŞLUK RAPORU =====
+                        # =====  RAPOR 1 =====
                         st.markdown("---")
-                        st.markdown("### 💤 4+ Gün Boşluk Raporu")
+                        st.markdown("### Rapor 1 ")
 
                         off_runs = []
                         for sid in staff_ids:
@@ -1713,7 +1728,73 @@ with tab_plan:
                                 mime="text/csv",
                                 key="dl_gap_csv"
                             )
-                        # ===== /4+ GÜN BOŞLUK RAPORU =====
+                        # ===== /RAPOR 1 =====
+
+                        # ===== RAPOR 2 =====
+                        st.markdown("---")
+                        st.markdown("### Rapor 2")
+
+                        holiday_dates_in_month = sorted(d for d in holiday_set if d.startswith(month_prefix))
+                        weekend_dates_in_month = {d.iso for d in day_infos if d.is_weekend}
+                        report2_rows = []
+
+                        for sid in staff_ids:
+                            holiday_shift_counts = {8: 0, 16: 0, 24: 0}
+                            holiday_date_details = []
+                            weekend_date_details = []
+
+                            for d_iso in holiday_dates_in_month:
+                                shift_value = cell.get((sid, d_iso))
+                                if not shift_value:
+                                    continue
+                                shift_parts = str(shift_value).split("+")
+                                shift_labels = []
+                                for shift_type in shift_parts:
+                                    hours_value = int(SHIFT_HOURS.get(str(shift_type), 0))
+                                    if hours_value in holiday_shift_counts:
+                                        holiday_shift_counts[hours_value] += 1
+                                    shift_labels.append(f"{shift_type}/{hours_value}")
+                                holiday_date_details.append(f"{d_iso} ({', '.join(shift_labels)})")
+
+                            for d_iso in sorted(weekend_dates_in_month):
+                                shift_value = cell.get((sid, d_iso))
+                                if not shift_value:
+                                    continue
+                                weekend_date_details.append(f"{d_iso} ({shift_value})")
+
+                            holiday_note_parts = []
+                            if holiday_shift_counts[8]:
+                                holiday_note_parts.append(f"{holiday_shift_counts[8]} gün 8 mesaisi")
+                            if holiday_shift_counts[16]:
+                                holiday_note_parts.append(f"{holiday_shift_counts[16]} gün 16 nöbeti")
+                            if holiday_shift_counts[24]:
+                                holiday_note_parts.append(f"{holiday_shift_counts[24]} gün 24 nöbeti")
+
+                            report2_rows.append({
+                                "Personel": staff_name_by_id.get(sid, f"ID:{sid}"),
+                                "ID": sid,
+                                "ResmiTatilCalismaSayisi": sum(holiday_shift_counts.values()),
+                                "ResmiTatilNotu": ", ".join(holiday_note_parts) if holiday_note_parts else "-",
+                                "ResmiTatilGunleri": " | ".join(holiday_date_details) if holiday_date_details else "-",
+                                "HaftaSonuNobetSayisi": len(weekend_date_details),
+                                "HaftaSonuNobetGunleri": " | ".join(weekend_date_details) if weekend_date_details else "-",
+                            })
+
+                        df_report2 = pd.DataFrame(report2_rows).sort_values(
+                            ["ID"],
+                            ascending=[True],
+                        ).reset_index(drop=True)
+
+                        st.caption("Resmi tatil çalışmaları kayıtlı tatil günleri ve aylık plan üzerinden otomatik hesaplanır.")
+                        st.dataframe(df_report2, width="stretch", height=280)
+                        st.download_button(
+                            "📄 Rapor 2 (CSV)",
+                            data=df_report2.to_csv(index=False).encode("utf-8"),
+                            file_name=f"rapor2_{int(year)}_{int(month):02d}.csv",
+                            mime="text/csv",
+                            key="dl_report2_csv"
+                        )
+                        # ===== /RAPOR 2 =====
     
                         st.markdown("---")
 
@@ -1849,21 +1930,91 @@ with tab_plan:
                                         styles.loc[i, "MesaiFarki"] = f"color: {COLOR_NEGATIVE}; font-weight: 600;"
                             return styles
     
-                        styler = df_matrix.style.apply(style_text_only, axis=None)
-                        st.dataframe(styler, width='stretch', height=680)
-    
+                        edit_mode = st.toggle(
+                            "Manuel düzenleme modunu aç",
+                            value=False,
+                            key=f"toggle_plan_editor_{int(year)}_{int(month):02d}",
+                        )
+
+                        if not edit_mode:
+                            styler = df_matrix.style.apply(style_text_only, axis=None)
+                            st.dataframe(styler, width='stretch', height=680)
+                            edited_df = df_matrix.copy()
+                        else:
+                            st.caption("Manuel düzenleme: Sadece gün hücrelerini değiştir. Geçerli değerler `8`, `16`, `24` veya boş bırakmaktır. `R` ve `İ` olan günler rapor/izin günüdür, kayıtta korunur.")
+
+                            edited_df = st.data_editor(
+                                df_matrix,
+                                width="stretch",
+                                height=680,
+                                hide_index=False,
+                                disabled=["Personel", "ID", "GerekliMesaiSaati", "ToplamMesaiSaati", "MesaiFarki", "Not"],
+                                key=f"plan_editor_{int(year)}_{int(month):02d}",
+                            )
+
+                            if st.button("💾 Çizelge Değişikliklerini Kaydet", type="primary", key=f"save_plan_editor_{int(year)}_{int(month):02d}"):
+                                value_to_shift = {"8": "DAY", "16": "NIGHT", "24": "D24", "": None}
+                                edited_assignments = []
+                                invalid_cells = []
+                                blocked_override_count = 0
+
+                                for _, edited_row in edited_df.iterrows():
+                                    sid = int(edited_row["ID"])
+                                    for d_iso, dcol in zip(day_isos, day_cols):
+                                        raw_value = edited_row.get(dcol, "")
+                                        normalized_value = "" if pd.isna(raw_value) else str(raw_value).strip().upper()
+                                        bt = month_blocked_type.get(sid, {}).get(d_iso)
+                                        is_holiday = d_iso in holiday_set
+                                        is_weekend_day = date.fromisoformat(d_iso).weekday() >= 5
+
+                                        if bt in ("rapor", "yillik_izin"):
+                                            if normalized_value not in ("", "R", "İ", "I"):
+                                                blocked_override_count += 1
+                                            continue
+
+                                        if normalized_value not in value_to_shift:
+                                            invalid_cells.append(f"{staff_name_by_id.get(sid, f'ID:{sid}')} - {d_iso}: `{normalized_value}`")
+                                            continue
+
+                                        if is_holiday and normalized_value in ("8", "16"):
+                                            invalid_cells.append(f"{staff_name_by_id.get(sid, f'ID:{sid}')} - {d_iso}: resmi tatilde sadece `24` yazilabilir")
+                                            continue
+
+                                        if (not is_holiday) and (not is_weekend_day) and normalized_value == "24":
+                                            invalid_cells.append(f"{staff_name_by_id.get(sid, f'ID:{sid}')} - {d_iso}: resmi tatil olmayan hafta ici gunde `24` yazilamaz")
+                                            continue
+
+                                        shift_type = value_to_shift[normalized_value]
+                                        if shift_type:
+                                            edited_assignments.append({
+                                                "date": d_iso,
+                                                "shift_type": shift_type,
+                                                "staff_id": sid,
+                                            })
+
+                                if invalid_cells:
+                                    st.error("Bazı hücrelerde geçersiz değer var. Sadece `8`, `16`, `24` veya boş bırakabilirsin.")
+                                    st.write(pd.DataFrame({"GecersizHucre": invalid_cells[:50]}))
+                                else:
+                                    clear_month(int(year), int(month))
+                                    insert_assignments(edited_assignments)
+                                    if blocked_override_count:
+                                        st.warning(f"{blocked_override_count} rapor/izin hücresindeki değişiklik yok sayıldı.")
+                                    st.success("Çizelge değişiklikleri kaydedildi.")
+                                    st.rerun()
+
                         st.markdown("### ⬇️ Çizelgeyi İndir (CSV / Excel)")
                         st.download_button(
                             "📄 CSV indir (Çizelge)",
-                            data=df_matrix.to_csv(index=False).encode("utf-8"),
+                            data=edited_df.to_csv(index=False).encode("utf-8"),
                             file_name=f"cizelge_{int(year)}_{int(month):02d}.csv",
                             mime="text/csv",
                             key="dl_matrix_csv"
                         )
     
-                        xlsx_bytes = export_schedule_xlsx(df_matrix, year=int(year), month=int(month))
+                        xlsx_bytes = export_schedule_xlsx(edited_df, year=int(year), month=int(month))
                         st.download_button("📊 Excel indir (.xlsx)",
-                                data=export_schedule_xlsx(df_matrix, int(year), int(month), sheet_name='Cizelge'),
+                                data=export_schedule_xlsx(edited_df, int(year), int(month), sheet_name='Cizelge'),
                                 file_name=f"cizelge_{int(year)}_{int(month):02d}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="dl_matrix_xlsx"
